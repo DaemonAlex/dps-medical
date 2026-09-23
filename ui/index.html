@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DPS Medical</title>
+<style>
+  :root{
+    --bg:#0e1416; --panel:#151d20; --panel2:#1b2529; --line:#243237; --line2:#2f4047;
+    --ink:#e7eef0; --ink2:#9fb2b8; --ink3:#6b8087;
+    --accent:#ff7a45; --accent2:#ffa172;
+    --sev0:#2f4047; --sev1:#d9b45c; --sev2:#e8853f; --sev3:#d3453a;
+    --ok:#4ec08a;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:var(--bg);color:var(--ink);
+       font-family:'Public Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+       font-size:14px;line-height:1.5;overflow:hidden}
+  .app{height:100%;display:flex;flex-direction:column}
+
+  header{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);
+         background:linear-gradient(180deg,var(--panel2),var(--panel));flex:none}
+  .mark{width:26px;height:26px;border-radius:7px;background:var(--accent);display:grid;place-items:center;
+        font-weight:700;color:#1a0e08;font-size:15px;flex:none}
+  header h1{font-size:17px;font-weight:600}
+  header .sub{font-size:11px;color:var(--ink3);letter-spacing:.08em;text-transform:uppercase}
+  .spacer{flex:1}
+  .who{text-align:right}
+  .who .n{font-weight:600}
+  .who .s{font-size:11.5px;color:var(--ink3)}
+
+  main{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px}
+  .empty{margin:auto;text-align:center;color:var(--ink3);max-width:34ch;padding:40px 0}
+  .empty b{display:block;color:var(--ink2);font-size:16px;margin-bottom:6px}
+
+  section{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  section>h2{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink3);
+             padding:11px 15px;border-bottom:1px solid var(--line);font-weight:600}
+  .rows{display:flex;flex-direction:column}
+  .row{display:grid;grid-template-columns:104px 1fr auto;gap:12px;align-items:center;
+       padding:10px 15px;border-bottom:1px solid rgba(255,255,255,.04)}
+  .row:last-child{border-bottom:none}
+  .row .k{color:var(--ink2);font-size:12.5px}
+  .tag{font-size:11.5px;padding:2px 8px;border-radius:4px;background:#0e1719;border:1px solid var(--line2);
+       color:var(--ink2);white-space:nowrap;display:inline-block;margin:2px 4px 2px 0}
+  .tag b{color:var(--ink)}
+  .dot{width:10px;height:10px;border-radius:50%;flex:none}
+  .muted{color:var(--ink3);font-style:italic;font-size:13px}
+
+  .cond{padding:12px 15px;border-bottom:1px solid rgba(255,255,255,.04);display:flex;gap:12px;align-items:flex-start}
+  .cond:last-child{border-bottom:none}
+  .cond .bar{width:3px;align-self:stretch;border-radius:2px;background:var(--sev2);flex:none}
+  .cond .body{flex:1}
+  .cond .t{font-weight:600}
+  .cond .m{font-size:12.5px;color:var(--ink3)}
+  .pill{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;padding:2px 8px;border-radius:999px;
+        border:1px solid currentColor;white-space:nowrap}
+  .pill.dx{color:var(--ok)} .pill.undx{color:var(--sev1)}
+
+  .visit{display:grid;grid-template-columns:78px 1fr;gap:12px;padding:9px 15px;
+         border-bottom:1px solid rgba(255,255,255,.04);font-size:13px}
+  .visit:last-child{border-bottom:none}
+  .visit time{color:var(--ink3);font-size:12px}
+  .visit .w{color:var(--ink3);font-size:12px}
+
+  footer{flex:none;padding:10px 18px;border-top:1px solid var(--line);color:var(--ink3);font-size:11.5px}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <span class="mark">D</span>
+    <div>
+      <h1>DPS Medical</h1>
+      <div class="sub">Patient chart</div>
+    </div>
+    <span class="spacer"></span>
+    <div class="who" id="who"></div>
+  </header>
+
+  <main id="main">
+    <div class="empty" id="empty">
+      <b>No patient selected</b>
+      Inspect someone with your medical kit and their chart opens here automatically.
+    </div>
+  </main>
+
+  <footer id="foot">Trauma is live from the scene. Records and conditions are from the chart.</footer>
+</div>
+
+<script>
+(function(){
+  var RES = "dps-medical";
+  var LIMBS = ["Head","Torso","Left arm","Right arm","Left leg","Right leg"];
+
+  function post(path, body){
+    return fetch("https://" + RES + "/" + path, {
+      method:"POST",
+      headers:{"Content-Type":"application/json; charset=UTF-8"},
+      body: JSON.stringify(body || {})
+    }).then(function(r){ return r.json(); }).catch(function(){ return null; });
+  }
+
+  function sevColor(n){ return n===0?"var(--sev0)":n<=2?"var(--sev1)":n<=4?"var(--sev2)":"var(--sev3)"; }
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
+
+  function when(ts){
+    if(!ts) return "";
+    var d = new Date(String(ts).replace(" ","T"));
+    if(isNaN(d)) return esc(ts);
+    return ("0"+d.getDate()).slice(-2)+"/"+("0"+(d.getMonth()+1)).slice(-2)+" "+
+           ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2);
+  }
+
+  function render(data){
+    var main = document.getElementById("main");
+    var who  = document.getElementById("who");
+
+    if(!data || !data.patient){
+      who.innerHTML = "";
+      main.innerHTML = '<div class="empty"><b>No patient selected</b>' +
+        'Inspect someone with your medical kit and their chart opens here automatically.</div>';
+      return;
+    }
+
+    who.innerHTML = '<div class="n">' + esc(data.patient.name || "Unknown") + '</div>' +
+                    '<div class="s">' + esc(data.patient.citizenid || "") + '</div>';
+
+    var html = "";
+
+    // ---- trauma, live from the scene -------------------------------------
+    html += '<section><h2>Injuries</h2><div class="rows">';
+    var anyHurt = false;
+    (data.body || []).forEach(function(z, i){
+      if(!z || !z.count) return;
+      anyHurt = true;
+      var tags = (z.injuries || []).map(function(inj){
+        return '<span class="tag"><b>' + inj.count + '&times;</b> ' + esc(inj.type) + '</span>';
+      }).join("");
+      html += '<div class="row"><span class="k">' + esc(LIMBS[i] || z.label) + '</span>' +
+              '<span>' + tags + '</span>' +
+              '<span class="dot" style="background:' + sevColor(z.count) + '"></span></div>';
+    });
+    if(!anyHurt) html += '<div class="row"><span class="k">Body</span><span class="muted">No untreated injuries</span><span></span></div>';
+    if(data.bleeding) html += '<div class="row"><span class="k">Bleeding</span><span>Stage ' +
+                              esc(data.bleeding) + ' &mdash; control this first</span>' +
+                              '<span class="dot" style="background:var(--sev3)"></span></div>';
+    html += '</div></section>';
+
+    // ---- conditions ------------------------------------------------------
+    html += '<section><h2>Conditions</h2>';
+    if(!data.conditions || !data.conditions.length){
+      html += '<div class="cond"><div class="body"><span class="muted">Nothing on record</span></div></div>';
+    } else {
+      data.conditions.forEach(function(c){
+        var dx = !!c.diagnosed_at;
+        html += '<div class="cond"><span class="bar" style="background:' +
+                (dx ? "var(--ok)" : "var(--sev1)") + '"></span><div class="body">' +
+                '<div class="t">' + esc(dx ? (c.label || c.condition_key) : "Undiagnosed illness") + '</div>' +
+                '<div class="m">' + (dx
+                    ? ("Diagnosed " + when(c.diagnosed_at))
+                    : "Symptomatic since " + when(c.contracted_at) + " &mdash; needs a test") +
+                '</div></div>' +
+                '<span class="pill ' + (dx ? "dx" : "undx") + '">' + (dx ? "diagnosed" : "unknown") + '</span></div>';
+      });
+    }
+    html += '</section>';
+
+    // ---- history ---------------------------------------------------------
+    html += '<section><h2>History</h2>';
+    if(!data.visits || !data.visits.length){
+      html += '<div class="visit"><time></time><span class="muted">No previous visits</span></div>';
+    } else {
+      data.visits.forEach(function(v){
+        var line = v.notes || v.event_type;
+        html += '<div class="visit"><time>' + when(v.created_at) + '</time><span>' +
+                esc(line) + (v.staff_name ? '<div class="w">' + esc(v.staff_name) + '</div>' : "") +
+                '</span></div>';
+      });
+    }
+    html += '</section>';
+
+    main.innerHTML = html;
+  }
+
+  // lb-tablet forwards messages to the app frame; our client also posts here.
+  window.addEventListener("message", function(e){
+    var d = e.data || {};
+    if(d.action === "dpsMedical:chart") render(d.data);
+    if(d.action === "dpsMedical:clear") render(null);
+  });
+
+  // Ask for whatever the medic is currently looking at when the app opens.
+  post("uiReady", {}).then(function(res){ if(res) render(res); });
+})();
+</script>
+</body>
+</html>
