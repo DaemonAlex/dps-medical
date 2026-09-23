@@ -121,6 +121,24 @@ Four findings from the first outside read, all confirmed in code and fixed in
    `durationMinutes / severityMax` minutes while symptomatic, capped at
    `severityMax`, via SQL; `syncConditions()` mirrors it into memory.
 
+**Round 1b — the deltas from the written spec (same day):**
+
+- `resolve()` now stamps `treated_at` when `how == 'treated'`, and the immunity
+  row's `reason` records `treated` vs `recovered` instead of always `recovered`.
+- Severity step is config: `Config.SeverityStepMinutes` (30) with a per-condition
+  `severityStepMinutes` override. **At `severityMax` a condition no longer clears
+  on its own** — someone has to treat it. Severity rides on every symptom in
+  `getMyState`, and `/health` scales the wording with `Config.SeverityWords`.
+- Medications: `client = { usetime = 4000 }` gives a progress bar on self-use.
+  `applyTreatment()` is shared by self-use and the new **`/administer <id> <item>`**
+  (and `dps-medical:administer` callback) — medic within
+  `Config.AdministerDistance` (3 m), item comes out of the medic's inventory,
+  refused unconsumed if the patient has nothing it treats, chart row records
+  who gave it.
+- Contagion guards, both config: `ContagionDuringIncubation = 0.25` multiplier
+  while a carrier is still incubating, `MaxNewInfectionsPerPass = 2` per carrier
+  per pass.
+
 ## Verify
 
 ```

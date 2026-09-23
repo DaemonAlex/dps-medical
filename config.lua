@@ -35,6 +35,24 @@ Config.ContagionDistance = 4.0
 -- Base chance per contagion check when in range, before per-condition modifiers.
 Config.ContagionBaseChance = 0.12
 
+-- Carriers still incubating spread at this fraction of the normal chance. A
+-- 45-minute silent window at full strength seeded a room before anyone knew.
+Config.ContagionDuringIncubation = 0.25
+
+-- One carrier can start at most this many new cases per contagion pass.
+Config.MaxNewInfectionsPerPass = 2
+
+-- Severity climbs one step every this many minutes while symptomatic and
+-- untreated, up to the condition's severityMax. A condition may override with
+-- its own severityStepMinutes. At severityMax it no longer clears on its own.
+Config.SeverityStepMinutes = 30
+
+-- How the patient hears a symptom at each severity. Never the illness name.
+Config.SeverityWords = { [1] = 'mild', [2] = 'getting worse', [3] = 'severe', [4] = 'critical' }
+
+-- How close a medic must be to give a patient a medication, in metres.
+Config.AdministerDistance = 3.0
+
 -- Set true to print every infection and progression to the server console.
 Config.Debug = false
 
@@ -141,6 +159,9 @@ Config.FacilityRadius = 30.0
 -- immunityMinutes   : how long they are immune after recovery; false = none.
 -- onsetFrom         : hooks that let TRAUMA cause illness, tying the two halves
 --                     together - an untreated gunshot can go septic.
+-- severityMax       : how far severity climbs. At max it will NOT clear on its
+--                     own any more - someone has to treat it.
+-- severityStepMinutes : optional; overrides Config.SeverityStepMinutes.
 Config.Conditions = {
     flu = {
         label = 'Influenza',

@@ -50,6 +50,7 @@
 		weight = 15,
 		stack = true,
 		close = true,
+		client = { usetime = 4000 },
 		server = { export = 'dps-medical.useMedication' },
 	},
 	['antibiotics'] = {
@@ -58,6 +59,7 @@
 		weight = 15,
 		stack = true,
 		close = true,
+		client = { usetime = 4000 },
 		server = { export = 'dps-medical.useMedication' },
 	},
 	['antiemetic'] = {
@@ -66,5 +68,6 @@
 		weight = 15,
 		stack = true,
 		close = true,
+		client = { usetime = 4000 },
 		server = { export = 'dps-medical.useMedication' },
 	},

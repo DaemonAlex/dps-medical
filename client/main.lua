@@ -266,7 +266,12 @@ RegisterCommand('health', function()
     end
 
     for _, s in ipairs(state.symptoms) do
-        options[#options + 1] = { title = s.label, description = s.patient, disabled = true }
+        -- Severity scales the wording, never names the illness.
+        local word = Config.SeverityWords and Config.SeverityWords[s.severity or 1]
+        options[#options + 1] = {
+            title = word and ('%s - %s'):format(s.label, word) or s.label,
+            description = s.patient, disabled = true,
+        }
     end
     for _, d in ipairs(state.diagnosed) do
         options[#options + 1] = { title = ('Diagnosed: %s'):format(d.label), description = 'Confirmed by a medic.', disabled = true }
