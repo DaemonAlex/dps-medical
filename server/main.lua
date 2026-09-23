@@ -10,6 +10,7 @@
 local conditions = {}   -- citizenid -> { [id] = row }  active conditions, mirrored from the DB
 local contagious = {}   -- citizenid -> true            fast lookup for the contagion pass
 local lastLimbs  = {}   -- citizenid -> limbs table     latest trauma, cached from wasabi's listener
+local woundSince = {}   -- citizenid -> { ["limb:type"] = { since = os.time(), rolled = {} } }  how long each wound has been open
 
 ---@param src number
 ---@return string? citizenid
@@ -137,16 +138,20 @@ local function resolve(citizenid, id, how)
     if not row then return end
     local def = Config.Conditions[row.condition_key]
 
-    MySQL.update('UPDATE dps_medical_conditions SET stage = ?, resolved_at = NOW() WHERE id = ?',
-        { 'resolved', id })
+    -- treated_at was left NULL forever; it is the difference between "a doctor
+    -- fixed this" and "it went away", and the chart needs it.
+    MySQL.update([[
+        UPDATE dps_medical_conditions
+        SET stage = ?, resolved_at = NOW(), treated_at = IF(?, NOW(), treated_at)
+        WHERE id = ?
+    ]], { 'resolved', how == 'treated' and 1 or 0, id })
 
     if def and def.immunityMinutes then
         MySQL.insert([[
             INSERT INTO dps_medical_immunity (citizenid, condition_key, reason, expires_at)
             VALUES (?,?,?, DATE_ADD(NOW(), INTERVAL ? MINUTE))
             ON DUPLICATE KEY UPDATE expires_at = VALUES(expires_at), reason = VALUES(reason)
-        ]], { citizenid, row.condition_key, how == 'treated' and 'recovered' or 'recovered',
-              def.immunityMinutes })
+        ]], { citizenid, row.condition_key, how, def.immunityMinutes })
     end
 
     recordVisit(citizenid, {
@@ -180,6 +185,65 @@ local function loadConditions(citizenid)
     debug('loaded %d conditions for %s', #rows, citizenid)
 end
 
+---@param list table?
+---@param value any
+---@return boolean
+local function listHas(list, value)
+    for i = 1, #(list or {}) do
+        if list[i] == value then return true end
+    end
+    return false
+end
+
+---Does an onsetFrom rule apply to this limb? No `zones` means any limb.
+---wasabi indexes limbs 1..6 in its documented order: 1 head, 2 body.
+---@param onset table
+---@param limbIndex number
+---@return boolean
+local function zoneMatches(onset, limbIndex)
+    if not onset.zones then return true end
+    for _, z in ipairs(onset.zones) do
+        if (z == 'head' and limbIndex == 1) or (z == 'body' and limbIndex == 2) then
+            return true
+        end
+    end
+    return false
+end
+
+---Pull stage, severity and diagnosis back out of the DB for one player.
+---
+---Every reader - runTest, the patient's own view, the contagion pass - works
+---from the in-memory cache, but the tick changes rows with plain SQL. Without
+---this the cache still said 'incubating' after incubation had ended, so nobody
+---ever became symptomatic until they relogged.
+---@param citizenid string
+local function syncConditions(citizenid)
+    local mine = conditions[citizenid]
+    if not mine or not next(mine) then return end
+    local rows = MySQL.query.await([[
+        SELECT id, stage, severity, diagnosed_at FROM dps_medical_conditions
+        WHERE citizenid = ? AND resolved_at IS NULL
+    ]], { citizenid }) or {}
+
+    local seen = {}
+    for i = 1, #rows do
+        local r = rows[i]
+        seen[r.id] = true
+        local row = mine[r.id]
+        if row then
+            row.stage, row.severity, row.diagnosed_at = r.stage, r.severity, r.diagnosed_at
+        end
+    end
+    -- Anything resolved behind our back (an admin in SQL, say) drops out too.
+    for id in pairs(mine) do
+        if not seen[id] then mine[id] = nil end
+    end
+    contagious[citizenid] = nil
+    for _, r in pairs(mine) do
+        if r.contagious == 1 and r.stage ~= 'resolved' then contagious[citizenid] = true end
+    end
+end
+
 -- ===========================================================================
 -- Progression - the slow server tick
 -- ===========================================================================
@@ -196,24 +260,71 @@ CreateThread(function()
               AND incubating_until IS NOT NULL AND incubating_until <= NOW()
         ]])
 
-        -- Natural recovery once a condition has run its course untreated.
+        -- Severity climbs while symptomatic and untreated: one step every
+        -- severityStepMinutes (the condition's own, else Config's), capped at
+        -- severityMax. Rows were inserted at 1 and never moved; this is the
+        -- number an ICU stay or a bill should scale from, so it has to.
+        for key, def in pairs(Config.Conditions) do
+            local max = def.severityMax or 1
+            if max > 1 then
+                local step = math.max(1, def.severityStepMinutes or Config.SeverityStepMinutes or 30)
+                MySQL.update([[
+                    UPDATE dps_medical_conditions
+                    SET severity = LEAST(?, 1 + FLOOR(TIMESTAMPDIFF(MINUTE, COALESCE(incubating_until, contracted_at), NOW()) / ?))
+                    WHERE condition_key = ? AND resolved_at IS NULL AND stage = 'symptomatic'
+                ]], { max, step, key })
+            end
+        end
+
+        -- Old wounds going bad. onsetFrom with untreatedMinutes > 0 was never
+        -- checked anywhere - the injury handler only rolled immediate onsets -
+        -- so "gunshot goes septic" could not happen. Each open wound is rolled
+        -- ONCE per condition when it crosses the age line, at the configured
+        -- chance; it is not re-rolled every tick.
+        for cid, wounds in pairs(woundSince) do
+            for key, def in pairs(Config.Conditions) do
+                local onset = def.onsetFrom
+                if onset and (onset.untreatedMinutes or 0) > 0 and not hasCondition(cid, key) then
+                    for wkey, w in pairs(wounds) do
+                        local limbIndex, injuryType = wkey:match('^(%d+):(.+)$')
+                        limbIndex = tonumber(limbIndex)
+                        if not w.rolled[key] and zoneMatches(onset, limbIndex)
+                            and listHas(onset.injuryTypes, injuryType)
+                            and os.time() - w.since >= onset.untreatedMinutes * 60 then
+                            w.rolled[key] = true
+                            if math.random() < (onset.chance or 0) then
+                                contract(cid, key, { source_kind = 'trauma' })
+                                debug('%s: %s left %d min -> %s', cid, wkey, onset.untreatedMinutes, key)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Natural recovery once a condition has run its course untreated -
+        -- but NOT once severity has reached the condition's max. At max it
+        -- stays until someone treats it: that is the "you need a doctor" hook.
         for key, def in pairs(Config.Conditions) do
             if def.durationMinutes then
                 local done = MySQL.query.await([[
                     SELECT id, citizenid FROM dps_medical_conditions
                     WHERE condition_key = ? AND resolved_at IS NULL AND stage = 'symptomatic'
+                      AND severity < ?
                       AND contracted_at <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-                ]], { key, (def.incubationMinutes or 0) + def.durationMinutes }) or {}
+                ]], { key, def.severityMax or 99, (def.incubationMinutes or 0) + def.durationMinutes }) or {}
                 for i = 1, #done do
                     resolve(done[i].citizenid, done[i].id, 'recovered')
                 end
             end
         end
 
-        -- Push fresh state to everyone who is online and unwell.
+        -- Mirror what the SQL above changed back into memory, then push fresh
+        -- state to everyone who is online and unwell.
         for _, src in ipairs(GetPlayers()) do
             local cid = cidOf(tonumber(src))
             if cid and conditions[cid] and next(conditions[cid]) then
+                syncConditions(cid)
                 TriggerClientEvent('dps-medical:client:conditions', tonumber(src),
                     lib.table.deepclone(conditions[cid]))
             end
@@ -238,7 +349,13 @@ CreateThread(function()
                     local cPed = GetPlayerPed(carrierSrc)
                     local cCoords = GetEntityCoords(cPed)
 
+                    -- Two guards against the snowball: a carrier starts at most
+                    -- MaxNewInfectionsPerPass cases per pass, and while still
+                    -- incubating spreads at a fraction of the normal chance.
+                    local started = 0
+                    local cap = Config.MaxNewInfectionsPerPass or math.huge
                     for _, nearSrc in ipairs(players) do
+                        if started >= cap then break end
                         nearSrc = tonumber(nearSrc)
                         if nearSrc ~= carrierSrc then
                             local nCoords = GetEntityCoords(GetPlayerPed(nearSrc))
@@ -250,11 +367,16 @@ CreateThread(function()
                                         if def and def.contagious and row.stage ~= 'resolved' then
                                             local chance = Config.ContagionBaseChance
                                                 * (def.contagionModifier or 1.0)
+                                            if row.stage == 'incubating' then
+                                                chance = chance * (Config.ContagionDuringIncubation or 1.0)
+                                            end
                                             if math.random() < chance then
-                                                contract(nearCid, row.condition_key, {
+                                                if contract(nearCid, row.condition_key, {
                                                     source_citizenid = carrierCid,
                                                     source_kind = 'contact',
-                                                })
+                                                }) then
+                                                    started = started + 1
+                                                end
                                             end
                                         end
                                     end
@@ -265,6 +387,75 @@ CreateThread(function()
                 end
             end
         end
+    end
+end)
+
+-- ===========================================================================
+-- Treatment items
+-- ===========================================================================
+--
+-- ox_inventory calls this for every item whose definition carries
+-- `server = { export = 'dps-medical.useMedication' }` (see install/items.lua).
+-- 'usingItem' fires before the item is consumed and returning false refuses
+-- it; 'usedItem' fires after. Which condition an item treats is read from
+-- Config.Conditions[*].treatment, so a new medication is config plus an item.
+
+---@param citizenid string
+---@param itemName string
+---@return table ids of open conditions this item treats
+local function treatableBy(citizenid, itemName)
+    local out = {}
+    for id, row in pairs(conditions[citizenid] or {}) do
+        local def = Config.Conditions[row.condition_key]
+        if def and def.treatment == itemName then out[#out + 1] = id end
+    end
+    return out
+end
+
+---Apply a medication to a patient. Shared by self-use (the ox_inventory export
+---below) and a medic administering it (`/administer`, further down, once
+---isMedic is in scope), so the rule is written once.
+---@param patientCid string
+---@param patientSrc number
+---@param itemName string
+---@param itemLabel string
+---@param staffSrc? number nil when the patient took it themselves
+---@return number treated how many conditions it resolved
+local function applyTreatment(patientCid, patientSrc, itemName, itemLabel, staffSrc)
+    local ids = treatableBy(patientCid, itemName)
+    for i = 1, #ids do resolve(patientCid, ids[i], 'treated') end
+
+    local staffName, staffJob
+    if staffSrc then staffName, staffJob = whoIs(staffSrc) end
+    recordVisit(patientCid, {
+        event_type = 'treatment', item = itemName,
+        staff_citizenid = staffSrc and cidOf(staffSrc) or nil,
+        staff_name = staffName, staff_job = staffJob,
+        notes = staffSrc and ('Given %s'):format(itemLabel) or ('Took %s'):format(itemLabel),
+    })
+    TriggerClientEvent('dps-medical:client:conditions', patientSrc,
+        lib.table.deepclone(conditions[patientCid] or {}))
+    return #ids
+end
+
+exports('useMedication', function(event, item, inventory, slot)
+    local src = inventory.id
+    local cid = cidOf(src)
+    if not cid then return false end
+
+    if event == 'usingItem' then
+        if #treatableBy(cid, item.name) == 0 then
+            TriggerClientEvent('ox_lib:notify', src, {
+                description = ('%s would not do anything for you right now.'):format(item.label),
+                type = 'inform',
+            })
+            return false -- refused, so it is not consumed
+        end
+    elseif event == 'usedItem' then
+        applyTreatment(cid, src, item.name, item.label, nil)
+        TriggerClientEvent('ox_lib:notify', src, {
+            description = ('You take the %s.'):format(item.label), type = 'success',
+        })
     end
 end)
 
@@ -336,21 +527,34 @@ AddEventHandler('wasabi_ambulance:Server:Listeners:OnInjuryUpdate', function(src
     -- having to ask the patient's own client for it.
     lastLimbs[cid] = limbs
 
+    -- Track how long each wound has been open. wasabi's limb data carries no
+    -- timestamps, so the first time we see a wound is when its clock starts;
+    -- when it heals (count back to 0) the clock is dropped. The tick reads
+    -- this for the slow onsets (untreatedMinutes > 0).
+    woundSince[cid] = woundSince[cid] or {}
+    local wounds, open = woundSince[cid], {}
+    for limbIndex, limb in pairs(limbs) do
+        if type(limb) == 'table' and type(limb.injuries) == 'table' then
+            for injuryType, count in pairs(limb.injuries) do
+                if (tonumber(count) or 0) > 0 then
+                    local wkey = ('%d:%s'):format(limbIndex, injuryType)
+                    open[wkey] = true
+                    if not wounds[wkey] then wounds[wkey] = { since = os.time(), rolled = {} } end
+                end
+            end
+        end
+    end
+    for wkey in pairs(wounds) do
+        if not open[wkey] then wounds[wkey] = nil end
+    end
+
+    -- Immediate onsets (untreatedMinutes == 0): roll the moment a matching
+    -- wound APPEARS, once, at the configured chance.
     for key, def in pairs(Config.Conditions) do
         local onset = def.onsetFrom
-        if onset and onset.untreatedMinutes == 0 and not hasCondition(cid, key) then
+        if onset and (onset.untreatedMinutes or 0) == 0 and not hasCondition(cid, key) then
             for limbIndex, limb in pairs(limbs) do
-                local zoneOk = true
-                if onset.zones then
-                    zoneOk = false
-                    for _, z in ipairs(onset.zones) do
-                        -- wasabi indexes limbs 1..6 in the documented order.
-                        if (z == 'head' and limbIndex == 1) or (z == 'body' and limbIndex == 2) then
-                            zoneOk = true
-                        end
-                    end
-                end
-                if zoneOk and type(limb) == 'table' and limb.injuries then
+                if zoneMatches(onset, limbIndex) and type(limb) == 'table' and limb.injuries then
                     for _, injuryType in ipairs(onset.injuryTypes or {}) do
                         local now = limb.injuries[injuryType] or 0
                         local before = previousLimbs and previousLimbs[limbIndex]
@@ -379,7 +583,24 @@ AddEventHandler('qbx_core:server:playerUnloaded', function(source, citizenid)
     if citizenid then
         conditions[citizenid] = nil
         contagious[citizenid] = nil
+        woundSince[citizenid] = nil
     end
+end)
+
+-- Same class of bug from the other side: playerLoaded only fires for people
+-- who join AFTER this resource starts. Anyone already online when it (re)starts
+-- had an empty cache until they relogged. Hydrate them now.
+CreateThread(function()
+    Wait(2000) -- let oxmysql settle
+    local n = 0
+    for _, src in ipairs(GetPlayers()) do
+        local cid = cidOf(tonumber(src))
+        if cid then
+            loadConditions(cid)
+            n = n + 1
+        end
+    end
+    if n > 0 then debug('hydrated conditions for %d online players', n) end
 end)
 
 -- ===========================================================================
@@ -555,23 +776,31 @@ lib.callback.register('dps-medical:getMyState', function(src)
     if not cid then return {} end
 
     local out = { symptoms = {}, diagnosed = {} }
-    local seen = {}
+    local seen = {} -- symptom key -> index in out.symptoms
     for _, row in pairs(conditions[cid] or {}) do
         if row.stage == 'symptomatic' then
             local def = Config.Conditions[row.condition_key]
             if def then
+                -- Severity rides along so the wording can scale ("a cough" vs
+                -- "you can barely breathe") without ever naming the illness.
+                local sev = tonumber(row.severity) or 1
                 for _, s in ipairs(def.symptoms or {}) do
-                    if not seen[s] then
-                        seen[s] = true
-                        out.symptoms[#out.symptoms + 1] = {
+                    local i = seen[s]
+                    if not i then
+                        i = #out.symptoms + 1
+                        seen[s] = i
+                        out.symptoms[i] = {
                             key = s,
                             label = Config.Symptoms[s] and Config.Symptoms[s].label or s,
                             patient = Config.Symptoms[s] and Config.Symptoms[s].patient or '',
+                            severity = sev,
                         }
+                    elseif sev > out.symptoms[i].severity then
+                        out.symptoms[i].severity = sev
                     end
                 end
                 if row.diagnosed_at then
-                    out.diagnosed[#out.diagnosed + 1] = { key = row.condition_key, label = def.label }
+                    out.diagnosed[#out.diagnosed + 1] = { key = row.condition_key, label = def.label, severity = sev }
                 end
             end
         end
@@ -694,6 +923,55 @@ lib.addCommand('diagnose', {
             if row.condition_key == args.condition then row.diagnosed_at = os.date('%Y-%m-%d %H:%M:%S') end
         end
     end
+end)
+
+---A medic gives a medication from their own inventory to a patient in reach.
+---@param src number medic
+---@param targetSrc number patient
+---@param itemName string
+---@return table { ok = boolean, line = string }
+local function administer(src, targetSrc, itemName)
+    if not isMedic(src) then return { ok = false, line = 'You are not medical staff.' } end
+    local cid = cidOf(targetSrc)
+    if not cid then return { ok = false, line = 'No such patient.' } end
+
+    local a, b = GetPlayerPed(src), GetPlayerPed(targetSrc)
+    if a == 0 or b == 0 or #(GetEntityCoords(a) - GetEntityCoords(b)) > (Config.AdministerDistance or 3.0) then
+        return { ok = false, line = 'Get closer to the patient.' }
+    end
+
+    local def = exports.ox_inventory:Items(itemName)
+    if not def then return { ok = false, line = 'No such item.' } end
+    if #treatableBy(cid, itemName) == 0 then
+        return { ok = false, line = ('%s would not do anything for them.'):format(def.label) }
+    end
+    -- Comes out of the medic's pocket, not the patient's.
+    if not exports.ox_inventory:RemoveItem(src, itemName, 1) then
+        return { ok = false, line = ('You have no %s.'):format(def.label) }
+    end
+
+    applyTreatment(cid, targetSrc, itemName, def.label, src)
+    TriggerClientEvent('ox_lib:notify', targetSrc, {
+        description = ('A medic gives you %s.'):format(def.label), type = 'inform',
+    })
+    return { ok = true, line = ('Gave %s.'):format(def.label) }
+end
+
+lib.callback.register('dps-medical:administer', function(src, targetSrc, itemName)
+    return administer(src, targetSrc, itemName)
+end)
+
+lib.addCommand('administer', {
+    help = 'Give a patient a medication from your inventory (medical staff only)',
+    params = {
+        { name = 'id', type = 'playerId', help = 'Patient server id' },
+        { name = 'item', type = 'string', help = 'antiviral | antibiotics | antiemetic' },
+    },
+}, function(source, args)
+    local res = administer(source, args.id, args.item)
+    TriggerClientEvent('ox_lib:notify', source, {
+        description = res.line, type = res.ok and 'success' or 'error',
+    })
 end)
 
 lib.addCommand('givecondition', {
