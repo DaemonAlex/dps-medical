@@ -164,6 +164,13 @@ facility the admin is standing in when none is named (refuses outside one),
 and appends a paste-ready block to `station_captures.txt`. Boot warns about any
 station naming a facility wasabi does not have.
 
+**Ocean Medical Center's nine beds are in.** Not captured: generated from
+wasabi's own bed list in `wsb_ambulance_facilities` (model `lit1_hospital`),
+flagged `wasabiBed = true`. Those beds keep wasabi's own menu — we register no
+target options on them — and occupancy is read from wasabi's `getPlayerBed`
+export matched by position (`stationOfPatient`). Lab and imaging stations for
+OMC still need `/stationcapture` in game.
+
 **Guess, don't diagnose.** Conditions carry `requiresConfirmation`. A
 `confirms` hit in a test stamps `confirmed_at` (new column, in
 `install/install.sql`). `/diagnose` refuses an unconfirmed condition that

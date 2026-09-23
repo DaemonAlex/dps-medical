@@ -126,8 +126,15 @@ each with its own target label and lying/sitting animation). Every station
 belongs to a wasabi facility — this is an add-on to wasabi_ambulance, and it
 refuses to attach a station anywhere wasabi does not call a hospital.
 
-Nothing is typed by hand. Stand where the patient should lie or sit, look
-straight at the prop, and run **`/stationcapture <kind>`** (admin). The facility
+Wasabi's own facility beds are stations too, marked `wasabiBed = true`, and
+they come straight out of wasabi's bed list for the facility — same prop, same
+coordinates, so the two systems agree bed for bed. Those beds keep wasabi's
+menu (lay, check in, heal); this resource adds nothing on top and reads who is
+in one from wasabi's `getPlayerBed` export. One bed, one system.
+
+For everything else nothing is typed by hand. Stand where the patient should
+lie or sit, look straight at the prop, and run **`/stationcapture <kind>`**
+(admin). The facility
 is resolved from the wasabi facility you are standing in; the prop name comes
 from the game; the block lands in `station_captures.txt` inside the resource,
 ready to paste into `Config.Stations`. Restart, and the prop grows target

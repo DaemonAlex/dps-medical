@@ -92,7 +92,9 @@ local function stationForEntity(entity)
     local pos = GetEntityCoords(entity)
     local bestId, best, bestD = nil, nil, 2.5
     for id, st in pairs(Config.Stations) do
-        if joaat(st.prop) == model then
+        local h = type(st.prop) == 'number' and st.prop or joaat(st.prop)
+        -- wasabi's own facility beds keep wasabi's menu; we never add ours on top.
+        if h == model and not st.wasabiBed then
             local d = #(pos - vec3(st.coords.x, st.coords.y, st.coords.z))
             if d < bestD then bestId, best, bestD = id, st, d end
         end
@@ -171,9 +173,12 @@ end)
 CreateThread(function()
     local models, seen = {}, {}
     for _, st in pairs(Config.Stations) do
-        if st.prop and not seen[st.prop] then
+        -- Beds that wasabi already runs (wasabiBed) get no options from us:
+        -- "Lay in Bed" is wasabi's, and two lie-down menus on one bed is the
+        -- parallel-system mistake this resource exists to avoid.
+        if st.prop and not st.wasabiBed and not seen[st.prop] then
             seen[st.prop] = true
-            models[#models + 1] = joaat(st.prop)
+            models[#models + 1] = type(st.prop) == 'number' and st.prop or joaat(st.prop)
         end
     end
     if #models == 0 then return end

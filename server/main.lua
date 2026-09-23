@@ -802,14 +802,40 @@ local function nearStation(src, st)
     return #(GetEntityCoords(ped) - vec3(c.x, c.y, c.z)) <= (Config.StationInteractDistance or 3.0) + 1.5
 end
 
+---Which station a patient is on. Our own occupancy first; for beds wasabi
+---runs (wasabiBed) ask wasabi, which tracks bed occupancy server-side, and
+---match its bed to ours by position. Nothing is polled.
+---@param cid string
+---@param src number
+---@return string? stationId, table? station
+local function stationOfPatient(cid, src)
+    local sid = patientStation[cid]
+    if sid then return sid, Config.Stations[sid] end
+
+    local bed
+    pcall(function() bed = exports.wasabi_ambulance_v2:getPlayerBed(src) end)
+    if bed == nil then pcall(function() bed = exports.wasabi_ambulance:getPlayerBed(src) end) end
+    local c = type(bed) == 'table' and (bed.coords or bed) or nil
+    if c and c.x and c.y and c.z then
+        local p = vec3(c.x + 0.0, c.y + 0.0, c.z + 0.0)
+        for id, st in pairs(Config.Stations) do
+            if st.wasabiBed and #(p - vec3(st.coords.x, st.coords.y, st.coords.z)) <= 1.5 then
+                return id, st
+            end
+        end
+    end
+    return nil
+end
+
 -- A conscious patient puts themself on a free station they are standing at.
 -- Downed players go through wasabi's stretcher; that stays wasabi's.
 lib.callback.register('dps-medical:occupy', function(src, sid)
     local st = Config.Stations[sid]
     local cid = cidOf(src)
     if not st or not cid then return { ok = false, line = 'No such station.' } end
+    if st.wasabiBed then return { ok = false, line = 'That bed is run by the hospital desk - use its own menu.' } end
     if stationOccupant[sid] then return { ok = false, line = 'Someone is already on it.' } end
-    if patientStation[cid] then return { ok = false, line = 'You are already on a station.' } end
+    if stationOfPatient(cid, src) then return { ok = false, line = 'You are already on a station.' } end
     if not nearStation(src, st) then return { ok = false, line = 'Get to the station first.' } end
     local dead = false
     pcall(function() dead = exports.wasabi_ambulance_v2:isPlayerDead(src) end)
@@ -946,8 +972,8 @@ local function runTest(staffSrc, patientSrc, testKey)
     -- on a station of the test's kind, and the medic beside it.
     local station
     if test.where ~= 'field' then
-        local sid = patientStation[cid]
-        station = sid and Config.Stations[sid]
+        local _
+        _, station = stationOfPatient(cid, patientSrc)
         if not station or station.kind ~= test.where then
             return { ok = false, line = anyStationOfKind(test.where)
                 and ('%s: the patient has to be on the %s first.'):format(test.label, kindLabel(test.where))
@@ -1027,8 +1053,8 @@ end)
 -- station kind the patient is on, and which kinds exist on this server at all.
 lib.callback.register('dps-medical:testAvailability', function(src, patientSrc)
     local cid = patientSrc and cidOf(patientSrc)
-    local sid = cid and patientStation[cid]
-    local st = sid and Config.Stations[sid]
+    local st
+    if cid then local _; _, st = stationOfPatient(cid, patientSrc) end
     local kinds = {}
     for _, s in pairs(Config.Stations) do kinds[s.kind] = true end
     return { patientKind = st and st.kind or nil, kinds = kinds }

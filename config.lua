@@ -184,6 +184,10 @@ Config.FacilityRadius = 30.0
 -- slot            : where the patient is placed, with heading
 -- anim            : optional; overrides the kind's default
 -- transferSeconds : how long a medic's transfer takes
+-- wasabiBed       : true = one of wasabi's own facility beds (from its
+--                   /facilitypanel bed list). wasabi runs lying down, check-in
+--                   and healing there; we add NO menu of our own and read who
+--                   is in it from wasabi (getPlayerBed). One bed, one system.
 --
 -- CAPTURE, no typing: stand where the patient should lie or sit, look straight
 -- at the prop, and run  /stationcapture <kind> <facility name>  (admin). The
@@ -205,16 +209,97 @@ Config.StationKinds = {
                  anim = { dict = 'anim@gangops@morgue@table@', clip = 'body_search', flag = 1 } },
 }
 
--- Empty until the hospitals are built. /stationcapture writes the entries.
+-- /stationcapture writes new entries. The beds below were not typed or
+-- captured: they are wasabi's own bed list for the facility, read out of
+-- wsb_ambulance_facilities on 2026-09-23 (model 1570477186 = lit1_hospital,
+-- the OMC map's custom bed), so the two systems agree bed for bed.
 Config.Stations = {
-    -- bed_ocean_medical_center_1 = {
-    --     facility = 'Ocean Medical Center',
-    --     kind = 'bed',
-    --     prop = 'v_med_bed1',
-    --     coords = vec4(x, y, z, h),
-    --     slot = vec4(x, y, z, h),
-    --     transferSeconds = 20,
-    -- },
+    -- ---- Ocean Medical Center: wards (wasabi beds) --------------------------
+    bed_ocean_medical_center_1 = {
+        facility = 'Ocean Medical Center',
+        kind = 'bed',
+        prop = 'lit1_hospital',
+        coords = vec4(-1865.75, -332.10, 48.76, 137.5),
+        slot = vec4(-1865.75, -332.10, 50.13, 137.5),
+        wasabiBed = true,        -- wasabi owns lying down here; we only read it
+        transferSeconds = 20,
+    },
+    bed_ocean_medical_center_2 = {
+        facility = 'Ocean Medical Center',
+        kind = 'bed',
+        prop = 'lit1_hospital',
+        coords = vec4(-1868.59, -329.93, 48.76, 141.6),
+        slot = vec4(-1868.59, -329.93, 50.13, 141.6),
+        wasabiBed = true,        -- wasabi owns lying down here; we only read it
+        transferSeconds = 20,
+    },
+    bed_ocean_medical_center_3 = {
+        facility = 'Ocean Medical Center',
+        kind = 'bed',
+        prop = 'lit1_hospital',
+        coords = vec4(-1865.70, -325.47, 48.76, 321.3),
+        slot = vec4(-1865.70, -325.47, 50.15, 321.3),
+        wasabiBed = true,        -- wasabi owns lying down here; we only read it
+        transferSeconds = 20,
+    },
+    bed_ocean_medical_center_4 = {
+        facility = 'Ocean Medical Center',
+        kind = 'bed',
+        prop = 'lit1_hospital',
+        coords = vec4(-1872.32, -326.92, 48.76, 142.3),
+        slot = vec4(-1872.32, -326.92, 50.13, 142.3),
+        wasabiBed = true,        -- wasabi owns lying down here; we only read it
+        transferSeconds = 20,
+    },
+    bed_ocean_medical_center_5 = {
+        facility = 'Ocean Medical Center',
+        kind = 'bed',
+        prop = 'lit1_hospital',
+        coords = vec4(-1868.81, -323.12, 48.76, 321.9),
+        slot = vec4(-1868.81, -323.12, 50.13, 321.9),
+        wasabiBed = true,        -- wasabi owns lying down here; we only read it
+        transferSeconds = 20,
+    },
+    bed_ocean_medical_center_6 = {
+        facility = 'Ocean Medical Center',
+        kind = 'bed',
+        prop = 'lit1_hospital',
+        coords = vec4(-1875.22, -324.74, 48.76, 142.2),
+        slot = vec4(-1875.22, -324.74, 50.13, 142.2),
+        wasabiBed = true,        -- wasabi owns lying down here; we only read it
+        transferSeconds = 20,
+    },
+    bed_ocean_medical_center_7 = {
+        facility = 'Ocean Medical Center',
+        kind = 'bed',
+        prop = 'lit1_hospital',
+        coords = vec4(-1871.96, -320.60, 48.76, 322.2),
+        slot = vec4(-1871.96, -320.60, 50.13, 322.2),
+        wasabiBed = true,        -- wasabi owns lying down here; we only read it
+        transferSeconds = 20,
+    },
+    bed_ocean_medical_center_8 = {
+        facility = 'Ocean Medical Center',
+        kind = 'bed',
+        prop = 'lit1_hospital',
+        coords = vec4(-1878.53, -322.07, 48.76, 141.5),
+        slot = vec4(-1878.53, -322.07, 50.13, 141.5),
+        wasabiBed = true,        -- wasabi owns lying down here; we only read it
+        transferSeconds = 20,
+    },
+    bed_ocean_medical_center_9 = {
+        facility = 'Ocean Medical Center',
+        kind = 'bed',
+        prop = 'lit1_hospital',
+        coords = vec4(-1875.24, -318.05, 48.76, 321.7),
+        slot = vec4(-1875.24, -318.05, 50.13, 321.7),
+        wasabiBed = true,        -- wasabi owns lying down here; we only read it
+        transferSeconds = 20,
+    },
+
+    -- ---- Ocean Medical Center: lab and imaging ------------------------------
+    -- Captured in game with /stationcapture; paste the blocks from
+    -- station_captures.txt here. Until a kind exists its tests refuse.
 }
 
 -- ===========================================================================
