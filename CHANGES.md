@@ -139,6 +139,44 @@ Four findings from the first outside read, all confirmed in code and fixed in
   while a carrier is still incubating, `MaxNewInfectionsPerPass = 2` per carrier
   per pass.
 
+## Part B step 3 — stations (B1 + B2), plus three asks from the same session
+
+**Stations replace the radius.** `Config.Stations` is the registry: one real
+map prop, one patient at a time, `kind` ∈ `Config.StationKinds`
+(`bed bloodlab xray ct mri`). A hospital-only test's `where` is now a station
+kind, and `runTest` gates on the *patient* occupying a station of that kind
+with the medic beside it (`Config.StationInteractDistance`). No station of a
+kind on the server = that test does not exist here. `Config.FacilityRadius`
+remains only for the `atFacility` export. `confirmsInjury` (X-ray → broken
+bone from wasabi's limb data) was declared but never evaluated; it is now.
+
+**Occupancy** lives server-side (`stationOccupant` / `patientStation`), is
+broadcast to clients, cleared on disconnect. Target options on every station
+prop: one "use" option per kind ("Lie down", "Sit for a sample"…), "Get up",
+and "Release patient" for medics. Imaging kinds (`canLeave = false`) hold the
+patient until the scan completes or a medic releases them; beds let go when
+the patient walks off. Downed players are refused — that is wasabi's stretcher.
+
+**Add-on to wasabi, enforced:** a station must belong to a wasabi facility.
+`/stationcapture <kind> [facility]` (admin) raycasts the prop being looked at,
+takes the admin's position as the slot, resolves the facility from the wasabi
+facility the admin is standing in when none is named (refuses outside one),
+and appends a paste-ready block to `station_captures.txt`. Boot warns about any
+station naming a facility wasabi does not have.
+
+**Guess, don't diagnose.** Conditions carry `requiresConfirmation`. A
+`confirms` hit in a test stamps `confirmed_at` (new column, in
+`install/install.sql`). `/diagnose` refuses an unconfirmed condition that
+requires it; medication (self-use and `/administer`) refuses, unconsumed, a
+condition that requires confirmation and is not yet diagnosed. Food poisoning
+is the one treat-on-sight condition. Two placeholder conditions were added so
+the CT and MRI stations confirm something: `internal_bleed`, `soft_tissue` —
+numbers marked TUNE.
+
+**Breadcrumbs.** `Config.HintsBelowGrade` / `Config.Hints`: staff below the
+grade get a hint on every refusal (station, confirm, treat_undiagnosed)
+explaining what to do instead; above it, nothing.
+
 ## Verify
 
 ```
