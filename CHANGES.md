@@ -96,6 +96,31 @@ hospital is. `Config.FacilityRadius = 30.0`.
   phone app vs. hotkey vs. both is an open call.
 - `Config.Debug = false`; there is no test suite in this repo yet.
 
+## Review round 1 — fixed 2026-09-23
+
+Four findings from the first outside read, all confirmed in code and fixed in
+`server/main.lua` (plus three item lines):
+
+1. **Memory never caught up with the tick.** The tick flipped `stage` to
+   `symptomatic` with SQL, but every reader (`runTest`, `getMyState`,
+   contagion) works from the in-memory cache, which still said `incubating`
+   until the player relogged. Added `syncConditions()` — after the tick's SQL
+   it re-reads stage/severity/diagnosis for every online unwell player. Same
+   class of bug from the other side: players already online when the resource
+   (re)started had an empty cache; a start-up pass now hydrates them.
+2. **Treatment items did nothing.** No use hook existed. The three medications
+   now carry `server = { export = 'dps-medical.useMedication' }`
+   (`install/items.lua`); the export refuses the item (not consumed) if the
+   player has nothing it treats, otherwise resolves the matching condition(s)
+   as `treated` and writes a `treatment` row to the chart.
+3. **Wound infection could never fire.** Only `untreatedMinutes == 0` was ever
+   checked. `woundSince` now records when each open wound was first seen
+   (wasabi's limb data has no timestamps); the tick rolls each wound **once**
+   per condition when it crosses the age line. Clock resets on relog — known.
+4. **Severity never moved.** The tick now raises it one step every
+   `durationMinutes / severityMax` minutes while symptomatic, capped at
+   `severityMax`, via SQL; `syncConditions()` mirrors it into memory.
+
 ## Verify
 
 ```
