@@ -138,16 +138,20 @@ local function resolve(citizenid, id, how)
     if not row then return end
     local def = Config.Conditions[row.condition_key]
 
-    MySQL.update('UPDATE dps_medical_conditions SET stage = ?, resolved_at = NOW() WHERE id = ?',
-        { 'resolved', id })
+    -- treated_at was left NULL forever; it is the difference between "a doctor
+    -- fixed this" and "it went away", and the chart needs it.
+    MySQL.update([[
+        UPDATE dps_medical_conditions
+        SET stage = ?, resolved_at = NOW(), treated_at = IF(?, NOW(), treated_at)
+        WHERE id = ?
+    ]], { 'resolved', how == 'treated' and 1 or 0, id })
 
     if def and def.immunityMinutes then
         MySQL.insert([[
             INSERT INTO dps_medical_immunity (citizenid, condition_key, reason, expires_at)
             VALUES (?,?,?, DATE_ADD(NOW(), INTERVAL ? MINUTE))
             ON DUPLICATE KEY UPDATE expires_at = VALUES(expires_at), reason = VALUES(reason)
-        ]], { citizenid, row.condition_key, how == 'treated' and 'recovered' or 'recovered',
-              def.immunityMinutes })
+        ]], { citizenid, row.condition_key, how, def.immunityMinutes })
     end
 
     recordVisit(citizenid, {
@@ -256,14 +260,14 @@ CreateThread(function()
               AND incubating_until IS NOT NULL AND incubating_until <= NOW()
         ]])
 
-        -- Severity climbs while symptomatic: one step every
-        -- durationMinutes / severityMax minutes, capped at severityMax. Rows
-        -- were inserted at 1 and never moved; this is the number an ICU stay
-        -- or a bill should scale from, so it has to.
+        -- Severity climbs while symptomatic and untreated: one step every
+        -- severityStepMinutes (the condition's own, else Config's), capped at
+        -- severityMax. Rows were inserted at 1 and never moved; this is the
+        -- number an ICU stay or a bill should scale from, so it has to.
         for key, def in pairs(Config.Conditions) do
             local max = def.severityMax or 1
-            if max > 1 and def.durationMinutes then
-                local step = math.max(1, math.floor(def.durationMinutes / max))
+            if max > 1 then
+                local step = math.max(1, def.severityStepMinutes or Config.SeverityStepMinutes or 30)
                 MySQL.update([[
                     UPDATE dps_medical_conditions
                     SET severity = LEAST(?, 1 + FLOOR(TIMESTAMPDIFF(MINUTE, COALESCE(incubating_until, contracted_at), NOW()) / ?))
@@ -298,14 +302,17 @@ CreateThread(function()
             end
         end
 
-        -- Natural recovery once a condition has run its course untreated.
+        -- Natural recovery once a condition has run its course untreated -
+        -- but NOT once severity has reached the condition's max. At max it
+        -- stays until someone treats it: that is the "you need a doctor" hook.
         for key, def in pairs(Config.Conditions) do
             if def.durationMinutes then
                 local done = MySQL.query.await([[
                     SELECT id, citizenid FROM dps_medical_conditions
                     WHERE condition_key = ? AND resolved_at IS NULL AND stage = 'symptomatic'
+                      AND severity < ?
                       AND contracted_at <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-                ]], { key, (def.incubationMinutes or 0) + def.durationMinutes }) or {}
+                ]], { key, def.severityMax or 99, (def.incubationMinutes or 0) + def.durationMinutes }) or {}
                 for i = 1, #done do
                     resolve(done[i].citizenid, done[i].id, 'recovered')
                 end
@@ -342,7 +349,13 @@ CreateThread(function()
                     local cPed = GetPlayerPed(carrierSrc)
                     local cCoords = GetEntityCoords(cPed)
 
+                    -- Two guards against the snowball: a carrier starts at most
+                    -- MaxNewInfectionsPerPass cases per pass, and while still
+                    -- incubating spreads at a fraction of the normal chance.
+                    local started = 0
+                    local cap = Config.MaxNewInfectionsPerPass or math.huge
                     for _, nearSrc in ipairs(players) do
+                        if started >= cap then break end
                         nearSrc = tonumber(nearSrc)
                         if nearSrc ~= carrierSrc then
                             local nCoords = GetEntityCoords(GetPlayerPed(nearSrc))
@@ -354,11 +367,16 @@ CreateThread(function()
                                         if def and def.contagious and row.stage ~= 'resolved' then
                                             local chance = Config.ContagionBaseChance
                                                 * (def.contagionModifier or 1.0)
+                                            if row.stage == 'incubating' then
+                                                chance = chance * (Config.ContagionDuringIncubation or 1.0)
+                                            end
                                             if math.random() < chance then
-                                                contract(nearCid, row.condition_key, {
+                                                if contract(nearCid, row.condition_key, {
                                                     source_citizenid = carrierCid,
                                                     source_kind = 'contact',
-                                                })
+                                                }) then
+                                                    started = started + 1
+                                                end
                                             end
                                         end
                                     end
@@ -394,6 +412,32 @@ local function treatableBy(citizenid, itemName)
     return out
 end
 
+---Apply a medication to a patient. Shared by self-use (the ox_inventory export
+---below) and a medic administering it (`/administer`, further down, once
+---isMedic is in scope), so the rule is written once.
+---@param patientCid string
+---@param patientSrc number
+---@param itemName string
+---@param itemLabel string
+---@param staffSrc? number nil when the patient took it themselves
+---@return number treated how many conditions it resolved
+local function applyTreatment(patientCid, patientSrc, itemName, itemLabel, staffSrc)
+    local ids = treatableBy(patientCid, itemName)
+    for i = 1, #ids do resolve(patientCid, ids[i], 'treated') end
+
+    local staffName, staffJob
+    if staffSrc then staffName, staffJob = whoIs(staffSrc) end
+    recordVisit(patientCid, {
+        event_type = 'treatment', item = itemName,
+        staff_citizenid = staffSrc and cidOf(staffSrc) or nil,
+        staff_name = staffName, staff_job = staffJob,
+        notes = staffSrc and ('Given %s'):format(itemLabel) or ('Took %s'):format(itemLabel),
+    })
+    TriggerClientEvent('dps-medical:client:conditions', patientSrc,
+        lib.table.deepclone(conditions[patientCid] or {}))
+    return #ids
+end
+
 exports('useMedication', function(event, item, inventory, slot)
     local src = inventory.id
     local cid = cidOf(src)
@@ -408,17 +452,10 @@ exports('useMedication', function(event, item, inventory, slot)
             return false -- refused, so it is not consumed
         end
     elseif event == 'usedItem' then
-        local ids = treatableBy(cid, item.name)
-        for i = 1, #ids do resolve(cid, ids[i], 'treated') end
-        recordVisit(cid, {
-            event_type = 'treatment', item = item.name,
-            notes = ('Took %s'):format(item.label),
-        })
+        applyTreatment(cid, src, item.name, item.label, nil)
         TriggerClientEvent('ox_lib:notify', src, {
             description = ('You take the %s.'):format(item.label), type = 'success',
         })
-        TriggerClientEvent('dps-medical:client:conditions', src,
-            lib.table.deepclone(conditions[cid] or {}))
     end
 end)
 
@@ -739,23 +776,31 @@ lib.callback.register('dps-medical:getMyState', function(src)
     if not cid then return {} end
 
     local out = { symptoms = {}, diagnosed = {} }
-    local seen = {}
+    local seen = {} -- symptom key -> index in out.symptoms
     for _, row in pairs(conditions[cid] or {}) do
         if row.stage == 'symptomatic' then
             local def = Config.Conditions[row.condition_key]
             if def then
+                -- Severity rides along so the wording can scale ("a cough" vs
+                -- "you can barely breathe") without ever naming the illness.
+                local sev = tonumber(row.severity) or 1
                 for _, s in ipairs(def.symptoms or {}) do
-                    if not seen[s] then
-                        seen[s] = true
-                        out.symptoms[#out.symptoms + 1] = {
+                    local i = seen[s]
+                    if not i then
+                        i = #out.symptoms + 1
+                        seen[s] = i
+                        out.symptoms[i] = {
                             key = s,
                             label = Config.Symptoms[s] and Config.Symptoms[s].label or s,
                             patient = Config.Symptoms[s] and Config.Symptoms[s].patient or '',
+                            severity = sev,
                         }
+                    elseif sev > out.symptoms[i].severity then
+                        out.symptoms[i].severity = sev
                     end
                 end
                 if row.diagnosed_at then
-                    out.diagnosed[#out.diagnosed + 1] = { key = row.condition_key, label = def.label }
+                    out.diagnosed[#out.diagnosed + 1] = { key = row.condition_key, label = def.label, severity = sev }
                 end
             end
         end
@@ -878,6 +923,55 @@ lib.addCommand('diagnose', {
             if row.condition_key == args.condition then row.diagnosed_at = os.date('%Y-%m-%d %H:%M:%S') end
         end
     end
+end)
+
+---A medic gives a medication from their own inventory to a patient in reach.
+---@param src number medic
+---@param targetSrc number patient
+---@param itemName string
+---@return table { ok = boolean, line = string }
+local function administer(src, targetSrc, itemName)
+    if not isMedic(src) then return { ok = false, line = 'You are not medical staff.' } end
+    local cid = cidOf(targetSrc)
+    if not cid then return { ok = false, line = 'No such patient.' } end
+
+    local a, b = GetPlayerPed(src), GetPlayerPed(targetSrc)
+    if a == 0 or b == 0 or #(GetEntityCoords(a) - GetEntityCoords(b)) > (Config.AdministerDistance or 3.0) then
+        return { ok = false, line = 'Get closer to the patient.' }
+    end
+
+    local def = exports.ox_inventory:Items(itemName)
+    if not def then return { ok = false, line = 'No such item.' } end
+    if #treatableBy(cid, itemName) == 0 then
+        return { ok = false, line = ('%s would not do anything for them.'):format(def.label) }
+    end
+    -- Comes out of the medic's pocket, not the patient's.
+    if not exports.ox_inventory:RemoveItem(src, itemName, 1) then
+        return { ok = false, line = ('You have no %s.'):format(def.label) }
+    end
+
+    applyTreatment(cid, targetSrc, itemName, def.label, src)
+    TriggerClientEvent('ox_lib:notify', targetSrc, {
+        description = ('A medic gives you %s.'):format(def.label), type = 'inform',
+    })
+    return { ok = true, line = ('Gave %s.'):format(def.label) }
+end
+
+lib.callback.register('dps-medical:administer', function(src, targetSrc, itemName)
+    return administer(src, targetSrc, itemName)
+end)
+
+lib.addCommand('administer', {
+    help = 'Give a patient a medication from your inventory (medical staff only)',
+    params = {
+        { name = 'id', type = 'playerId', help = 'Patient server id' },
+        { name = 'item', type = 'string', help = 'antiviral | antibiotics | antiemetic' },
+    },
+}, function(source, args)
+    local res = administer(source, args.id, args.item)
+    TriggerClientEvent('ox_lib:notify', source, {
+        description = res.line, type = res.ok and 'success' or 'error',
+    })
 end)
 
 lib.addCommand('givecondition', {
