@@ -69,6 +69,213 @@ CreateThread(function()
 end)
 
 -- ===========================================================================
+-- Stations
+-- ===========================================================================
+--
+-- Beds, the blood lab, imaging tables: real props in the map, one patient at
+-- a time. The server owns who is on what; this half offers the target options
+-- on the props and puts the ped on the slot.
+
+local stationOccupied = {}   -- stationId -> server id of the occupant, pushed by the server
+local myStation = nil        -- stationId I am on
+
+RegisterNetEvent('dps-medical:client:stations', function(map)
+    stationOccupied = map or {}
+end)
+
+---The station this map object IS: same model, within a couple of metres.
+---@param entity number
+---@return string? id, table? station
+local function stationForEntity(entity)
+    if not entity or entity == 0 then return nil end
+    local model = GetEntityModel(entity)
+    local pos = GetEntityCoords(entity)
+    local bestId, best, bestD = nil, nil, 2.5
+    for id, st in pairs(Config.Stations) do
+        local h = type(st.prop) == 'number' and st.prop or joaat(st.prop)
+        -- wasabi's own facility beds keep wasabi's menu; we never add ours on top.
+        if h == model and not st.wasabiBed then
+            local d = #(pos - vec3(st.coords.x, st.coords.y, st.coords.z))
+            if d < bestD then bestId, best, bestD = id, st, d end
+        end
+    end
+    return bestId, best
+end
+
+local function placeOnStation(st, anim)
+    local ped, slot = PlayerPedId(), st.slot
+    SetEntityCoords(ped, slot.x, slot.y, slot.z, false, false, false, false)
+    SetEntityHeading(ped, slot.w)
+    if not anim then return end
+    if anim.scenario then
+        TaskStartScenarioAtPosition(ped, anim.scenario, slot.x, slot.y, slot.z, slot.w, 0, true, false)
+    elseif anim.dict and anim.clip then
+        lib.requestAnimDict(anim.dict)
+        TaskPlayAnim(ped, anim.dict, anim.clip, 8.0, -8.0, -1, anim.flag or 1, 0, false, false, false)
+    end
+end
+
+local function occupyStation(id, st)
+    local res = lib.callback.await('dps-medical:occupy', false, id)
+    if not res or not res.ok then
+        lib.notify({ description = res and res.line or 'No.', type = 'error' })
+        return
+    end
+    myStation = id
+    placeOnStation(st, res.anim)
+    local kind = Config.StationKinds[st.kind] or {}
+    lib.notify({ description = ('%s - %s'):format(kind.label or st.kind, st.facility or ''), type = 'inform' })
+end
+
+local function leaveStation()
+    local res = lib.callback.await('dps-medical:leave', false)
+    if not res or not res.ok then
+        lib.notify({ description = res and res.line or 'No.', type = 'error' })
+        return
+    end
+    myStation = nil
+    ClearPedTasks(PlayerPedId())
+end
+
+RegisterNetEvent('dps-medical:client:released', function()
+    myStation = nil
+    ClearPedTasks(PlayerPedId())
+    lib.notify({ description = 'You can get up.', type = 'inform' })
+end)
+
+-- Only runs while I am on a station; idles otherwise. An imaging table holds
+-- the patient (movement off); walking away from a bed counts as getting up.
+CreateThread(function()
+    while true do
+        if myStation then
+            local st = Config.Stations[myStation]
+            local kind = st and Config.StationKinds[st.kind] or {}
+            if kind.canLeave == false then
+                DisableControlAction(0, 30, true) -- move left/right
+                DisableControlAction(0, 31, true) -- move forward/back
+                DisableControlAction(0, 22, true) -- jump
+                DisableControlAction(0, 23, true) -- enter vehicle
+                Wait(0)
+            else
+                if st and #(GetEntityCoords(PlayerPedId()) - vec3(st.slot.x, st.slot.y, st.slot.z)) > 3.0 then
+                    leaveStation()
+                end
+                Wait(500)
+            end
+        else
+            Wait(1000)
+        end
+    end
+end)
+
+-- Target options on every station prop. One "use" option per kind so the
+-- label reads right ("Lie down" on a bed, "Sit for a sample" at the lab).
+CreateThread(function()
+    local models, seen = {}, {}
+    for _, st in pairs(Config.Stations) do
+        -- Beds that wasabi already runs (wasabiBed) get no options from us:
+        -- "Lay in Bed" is wasabi's, and two lie-down menus on one bed is the
+        -- parallel-system mistake this resource exists to avoid.
+        if st.prop and not st.wasabiBed and not seen[st.prop] then
+            seen[st.prop] = true
+            models[#models + 1] = type(st.prop) == 'number' and st.prop or joaat(st.prop)
+        end
+    end
+    if #models == 0 then return end
+
+    stationOccupied = lib.callback.await('dps-medical:stations', false) or {}
+    local me = GetPlayerServerId(PlayerId())
+    local options = {}
+
+    for kindKey, kind in pairs(Config.StationKinds) do
+        options[#options + 1] = {
+            name = 'dps_medical_station_use_' .. kindKey,
+            icon = 'fas fa-procedures',
+            label = kind.patientLabel or ('Use ' .. (kind.label or kindKey)),
+            distance = Config.StationInteractDistance or 3.0,
+            canInteract = function(entity)
+                if myStation then return false end
+                local id, st = stationForEntity(entity)
+                return id ~= nil and st.kind == kindKey and stationOccupied[id] == nil
+            end,
+            onSelect = function(data)
+                local id, st = stationForEntity(data.entity)
+                if id then occupyStation(id, st) end
+            end,
+        }
+    end
+
+    options[#options + 1] = {
+        name = 'dps_medical_station_leave',
+        icon = 'fas fa-walking',
+        label = 'Get up',
+        distance = Config.StationInteractDistance or 3.0,
+        canInteract = function(entity)
+            local id = stationForEntity(entity)
+            return id ~= nil and id == myStation
+        end,
+        onSelect = function() leaveStation() end,
+    }
+
+    options[#options + 1] = {
+        name = 'dps_medical_station_release',
+        icon = 'fas fa-user-nurse',
+        label = 'Release patient',
+        distance = Config.StationInteractDistance or 3.0,
+        canInteract = function(entity)
+            if not isMedic() then return false end
+            local id = stationForEntity(entity)
+            local occ = id and stationOccupied[id]
+            return occ ~= nil and occ ~= me
+        end,
+        onSelect = function(data)
+            local id = stationForEntity(data.entity)
+            local occ = id and stationOccupied[id]
+            if not occ then return end
+            local res = lib.callback.await('dps-medical:release', false, occ)
+            lib.notify({ description = res and res.line or 'No.', type = (res and res.ok) and 'success' or 'error' })
+        end,
+    }
+
+    exports.ox_target:addModel(models, options)
+end)
+
+-- /stationcapture <kind> <facility name>: stand where the patient should be,
+-- look at the prop, run it. The prop name comes from the game (same raycast
+-- idea as dps-whatobject), so nothing is typed by hand. Admin only, checked
+-- server side.
+RegisterCommand('stationcapture', function(_, args)
+    local kind = args[1]
+    local facility = table.concat(args, ' ', 2) -- optional: the server uses the wasabi facility you stand in
+    if not kind or not Config.StationKinds[kind] then
+        lib.notify({ description = 'Usage: /stationcapture <bed|bloodlab|xray|ct|mri> [facility name]', type = 'error', duration = 8000 })
+        return
+    end
+    local cam, rot = GetGameplayCamCoord(), GetGameplayCamRot(2)
+    local fwd = vector3(
+        -math.sin(math.rad(rot.z)) * math.abs(math.cos(math.rad(rot.x))),
+         math.cos(math.rad(rot.z)) * math.abs(math.cos(math.rad(rot.x))),
+         math.sin(math.rad(rot.x)))
+    local dest = cam + fwd * 15.0
+    local ray = StartShapeTestRay(cam.x, cam.y, cam.z, dest.x, dest.y, dest.z, 16, PlayerPedId(), 4)
+    local _, hit, _, _, entity = GetShapeTestResult(ray)
+    if hit ~= 1 or not entity or entity == 0 or GetEntityType(entity) ~= 3 then
+        lib.notify({ description = 'Look straight at the prop (bed, chair, table) and try again.', type = 'error' })
+        return
+    end
+    local name = GetEntityArchetypeName(entity)
+    if type(name) ~= 'string' or name == '' then name = ('hash %d'):format(GetEntityModel(entity)) end
+    local p, ped = GetEntityCoords(entity), PlayerPedId()
+    local s = GetEntityCoords(ped)
+    TriggerServerEvent('dps-medical:stationCapture', {
+        kind = kind, facility = facility, prop = name,
+        prop_x = p.x, prop_y = p.y, prop_z = p.z, prop_h = GetEntityHeading(entity),
+        slot_x = s.x, slot_y = s.y, slot_z = s.z, slot_h = GetEntityHeading(ped),
+    })
+    print(('[dps-medical] station capture: %s at %s, prop %s'):format(kind, facility, name))
+end, false)
+
+-- ===========================================================================
 -- Diagnostics, opened from wasabi's own inspection
 -- ===========================================================================
 --
@@ -81,18 +288,21 @@ local inspecting = nil -- server id of the patient currently being inspected
 local function openDiagnostics(targetServerId)
     if not isMedic() then return end
 
-    local avail = lib.callback.await('dps-medical:testAvailability', false) or {}
+    local avail = lib.callback.await('dps-medical:testAvailability', false, targetServerId) or {}
     local options = {}
 
     for key, test in pairs(Config.Tests) do
-        local hospitalOnly = test.where == 'facility'
-        local blocked = hospitalOnly and not avail.atFacility
+        local hospitalOnly = test.where ~= 'field'
+        local kind = hospitalOnly and Config.StationKinds[test.where] or nil
+        local kindLabel = kind and kind.label or test.where
+        local blocked = hospitalOnly and avail.patientKind ~= test.where
         options[#options + 1] = {
             title = test.label,
             description = blocked
-                and (avail.anyFacilities and 'Hospital only - bring them in'
-                     or 'Hospital only - no facilities set up yet')
-                or (hospitalOnly and 'Hospital equipment' or 'Field kit'),
+                and ((avail.kinds and avail.kinds[test.where])
+                     and ('Needs the patient on a %s'):format(kindLabel)
+                     or ('No %s set up on this server'):format(kindLabel))
+                or (hospitalOnly and ('On the %s'):format(kindLabel) or 'Field kit'),
             icon = blocked and 'lock' or 'stethoscope',
             disabled = blocked,
             onSelect = function()
@@ -105,7 +315,8 @@ local function openDiagnostics(targetServerId)
                     local res = lib.callback.await('dps-medical:runTest', false, targetServerId, key)
                     lib.notify({
                         title = res and res.label or test.label,
-                        description = res and res.line or 'No result.',
+                        description = (res and res.line or 'No result.')
+                            .. ((res and res.hint) and ('\n' .. res.hint) or ''),
                         type = (res and res.ok) and (res.abnormal and 'warning' or 'success') or 'error',
                         duration = 9000,
                     })

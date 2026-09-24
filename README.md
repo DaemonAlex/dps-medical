@@ -52,9 +52,12 @@ how the thing works.
    resource; nothing is copied into lb-tablet.
 6. **Hospitals** — build at least one facility in wasabi with `/facilitypanel`
    (name, allowed jobs, centre, check-in, beds, staff points), then run
-   `/reloadfacilities` or restart. Until a facility exists, every hospital-only
-   test refuses with a message saying so.
-7. Restart the server. Boot should show
+   `/reloadfacilities` or restart.
+7. **Stations** — inside that facility, `/stationcapture bed` at each bed,
+   `/stationcapture bloodlab` at the lab chair, and so on; paste the blocks
+   from `station_captures.txt` into `Config.Stations`; restart. Until a station
+   of a kind exists, that kind's tests refuse with a message saying so.
+8. Restart the server. Boot should show
    `[dps-medical] ready - 5 conditions defined, tick 60s, contagion 90s` and
    `[dps-medical] client ready - reading wasabi_ambulance, applying nothing`.
 
@@ -99,18 +102,60 @@ wasabi's limb data; it never writes to it.
 | `thermometer` | thermometer | field | fever |
 | `pulseox` | pulseox | field | breathlessness |
 | `penlight` | penlight | field | blurred vision (suggests a head injury, does not prove it) |
-| `bloodtest` | bloodtest_kit | **facility** | confirms flu / respiratory virus / infection |
-| `xray` | fixed equipment | **facility** | confirms a broken bone (reads wasabi's limbs) |
-| `ctscan` | fixed equipment | **facility** | confirms concussion |
+| `bloodtest` | bloodtest_kit | **bloodlab** station | confirms flu / respiratory virus / infection |
+| `xray` | fixed equipment | **xray** station | confirms a broken bone (reads wasabi's limbs) |
+| `ctscan` | fixed equipment | **ct** station | confirms concussion / internal bleeding |
+| `mri` | fixed equipment | **mri** station | confirms soft tissue injury |
 
-`where = 'facility'` means the medic must be within `Config.FacilityRadius`
-(30 m) of a point belonging to a wasabi facility. Facility points are read from
-wasabi's own `wsb_ambulance_facilities` table — every coordinate in a facility's
-`locations` JSON counts as part of the building — so there is exactly one
-definition of "hospital" on the server.
+A hospital is not a radius; it is equipment. `where` names a **station kind**,
+and the test runs only when the *patient* is on a station of that kind with the
+medic standing beside it (`Config.StationInteractDistance`, 3 m). No station of
+that kind on the server means that test does not exist here — no MRI, no
+soft-tissue diagnoses. That is the point. Rule: no condition is confirmable by
+more than one station kind.
 
 A test appends a `diagnosis` row to the patient's chart with the finding and
-who ran it.
+who ran it, and a confirming hit stamps the condition **confirmed** — which is
+what `/diagnose` and the medications check (see *Guess, don't diagnose*).
+
+### Stations
+
+`Config.Stations` is the registry: one real prop in the map, one patient at a
+time. Kinds are `bed`, `bloodlab`, `xray`, `ct`, `mri` (`Config.StationKinds`,
+each with its own target label and lying/sitting animation). Every station
+belongs to a wasabi facility — this is an add-on to wasabi_ambulance, and it
+refuses to attach a station anywhere wasabi does not call a hospital.
+
+Wasabi's own facility beds are stations too, marked `wasabiBed = true`, and
+they come straight out of wasabi's bed list for the facility — same prop, same
+coordinates, so the two systems agree bed for bed. Those beds keep wasabi's
+menu (lay, check in, heal); this resource adds nothing on top and reads who is
+in one from wasabi's `getPlayerBed` export. One bed, one system.
+
+For everything else nothing is typed by hand. Stand where the patient should
+lie or sit, look straight at the prop, and run **`/stationcapture <kind>`**
+(admin). The facility
+is resolved from the wasabi facility you are standing in; the prop name comes
+from the game; the block lands in `station_captures.txt` inside the resource,
+ready to paste into `Config.Stations`. Restart, and the prop grows target
+options: "Lie down" / "Sit for a sample" when it is free, "Get up" for the
+occupant, "Release patient" for staff. Imaging tables hold the patient until
+the scan completes or a medic releases them; beds let go when the patient walks
+away. Downed players are refused — that is wasabi's stretcher.
+
+### Guess, don't diagnose
+
+A condition with `requiresConfirmation = true` (everything but food poisoning)
+can be *suspected* freely, but `/diagnose` refuses it until a test that
+`confirms` it has been run on this patient, and medication — the patient's own
+or `/administer` — does nothing, and is not consumed, until it is diagnosed.
+Symptoms overlap on purpose; the panel or the scan is what separates them.
+
+### Breadcrumbs
+
+Staff below `Config.HintsBelowGrade` get a hint on every refusal telling them
+what to do instead ("have the patient lie on the bed, then run the test next to
+it"). From that grade up the system assumes they know.
 
 ### Conditions shipped
 
@@ -121,6 +166,12 @@ who ran it.
 | `food_poisoning` | Food Poisoning | nausea, fatigue | 10 min | no | antiemetic |
 | `infection` | Wound Infection | fever, localised pain, fatigue | 30 min | no | antibiotics |
 | `concussion` | Concussion | headache, blurred vision, nausea | 2 min | no | rest |
+| `internal_bleed` | Internal Bleeding | fatigue, nausea, breathlessness | 5 min | no | rest (placeholder — TUNE) |
+| `soft_tissue` | Soft Tissue Injury | localised pain, fatigue | 15 min | no | rest (placeholder — TUNE) |
+
+Severity climbs one step every `SeverityStepMinutes` while symptomatic and
+untreated, up to `severityMax`; **at max a condition no longer clears on its
+own** — someone has to treat it.
 
 ## In game
 
@@ -138,8 +189,13 @@ who ran it.
   menu of tests for the patient you are inspecting. Hospital-only tests are
   greyed out unless you are at a facility.
 - `/runtest <id> <test>` — the same thing by command.
-- `/diagnose <id> <condition>` — record a diagnosis. From then on the patient
-  sees the condition's name.
+- `/diagnose <id> <condition>` — record a diagnosis. Refused until the
+  confirming test has been run, for conditions that require one. From then on
+  the patient sees the condition's name.
+- `/administer <id> <item>` — give a medication from your own inventory to a
+  patient within 3 m. Refused, unconsumed, if it treats nothing they have or
+  the condition is not diagnosed yet.
+- On station props: "Release patient" lets anyone off a bed or table.
 - The **DPS Medical** tablet app — the chart: live trauma from wasabi, active
   conditions, and the visit history from `dps_medical_visits`.
 
@@ -148,6 +204,8 @@ who ran it.
 - `/givecondition <id> <condition>` — infect a player (source `admin`).
 - `/curecondition <id> <condition>` — resolve it as treated.
 - `/reloadfacilities` — re-read hospital points after `/facilitypanel`.
+- `/stationcapture <kind> [facility]` — capture the prop you are looking at as
+  a station (see *Stations*).
 
 ## Configuration (`config.lua`)
 
@@ -159,10 +217,19 @@ who ran it.
 | `ContagionSeconds` | 90 | contagion pass |
 | `ContagionDistance` | 4.0 m | airborne range |
 | `ContagionBaseChance` | 0.12 | per-check chance before the condition's modifier |
-| `FacilityRadius` | 30.0 m | "at the hospital" |
+| `ContagionDuringIncubation` | 0.25 | multiplier while a carrier is still incubating |
+| `MaxNewInfectionsPerPass` | 2 | cap per carrier per contagion pass |
+| `SeverityStepMinutes` | 30 | one severity step per this many minutes symptomatic; per-condition override `severityStepMinutes` |
+| `SeverityWords` | mild … critical | how the patient hears each severity |
+| `AdministerDistance` | 3.0 m | `/administer` reach |
+| `FacilityRadius` | 30.0 m | used by the `atFacility` export only |
+| `StationInteractDistance` | 3.0 m | how close to a station a medic or patient must be |
+| `StationKinds` | 5 | label, target text, animation and `canLeave` per kind |
+| `Stations` | empty | the registry; filled from `/stationcapture` |
+| `HintsBelowGrade` / `Hints` | 3 | breadcrumbs for junior staff |
 | `Symptoms` | 9 | label + what the patient reads |
-| `Tests` | 6 | see above; `detects` narrows, `confirms` names |
-| `Conditions` | 5 | see above; `onsetFrom` is the trauma hook |
+| `Tests` | 7 | see above; `detects` narrows, `confirms` names, `where` is a station kind |
+| `Conditions` | 7 | see above; `onsetFrom` is the trauma hook, `requiresConfirmation` the diagnosis gate |
 | `Debug` | false | print every infection and progression |
 
 ## API
@@ -216,8 +283,10 @@ it inside its app frame, and wasabi's inspection UI receives it by
 
 - The seven item images are missing from `ox_inventory/web/images/`; the items
   work but render blank.
-- No hospital facility is built yet on DPS, so the facility-only path has not
-  been exercised in game.
+- No stations are captured yet on DPS (the hospitals are still being built in
+  wasabi), so the station path has not been exercised in game.
+- The wound-age clock for slow onsets (infection, internal bleeding) restarts
+  on relog: wasabi's limb data carries no timestamps.
 - Where the patient self-view lives long-term (phone app, hotkey, both) is an
   open decision; `/health` is the interim.
 - No test suite.

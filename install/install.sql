@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS `dps_medical_conditions` (
   `incubating_until` datetime DEFAULT NULL,
   `diagnosed_at` datetime DEFAULT NULL,
   `diagnosed_by` varchar(50) DEFAULT NULL,
+  `confirmed_at` datetime DEFAULT NULL,
   `treated_at` datetime DEFAULT NULL,
   `resolved_at` datetime DEFAULT NULL,
   `data` longtext DEFAULT NULL,
