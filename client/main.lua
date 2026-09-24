@@ -143,6 +143,41 @@ RegisterNetEvent('dps-medical:client:released', function()
     lib.notify({ description = 'You can get up.', type = 'inform' })
 end)
 
+-- A medic transferred me: the server has already booked the station.
+RegisterNetEvent('dps-medical:client:placed', function(sid, slot, anim, label, facility)
+    local st = Config.Stations[sid]
+    if not st then return end
+    myStation = sid
+    placeOnStation(st, anim)
+    lib.notify({ description = ('%s - %s'):format(label or st.kind, facility or ''), type = 'inform' })
+end)
+
+-- Whether any medical staff is on duty; the desk fallback shows only when not.
+-- Assume yes until the server says otherwise, so the option never flashes.
+local staffOnDuty = true
+RegisterNetEvent('dps-medical:client:staff', function(onDuty)
+    staffOnDuty = onDuty and true or false
+end)
+
+---Any symptomatic condition on me right now?
+---@return boolean
+local function feelingIll()
+    for _, row in pairs(myConditions) do
+        if row.stage == 'symptomatic' then return true end
+    end
+    return false
+end
+
+local function requestDesk()
+    local res = lib.callback.await('dps-medical:npcRequest', false)
+    if not res or not res.ok then
+        lib.notify({ description = res and res.line or 'No.', type = 'error', duration = 7000 })
+        return
+    end
+    lib.notify({ description = res.line, type = 'inform', duration = 10000 })
+    lib.notify({ description = ('$%d. Stay on the bed about %d minutes.'):format(res.cost or 0, res.minutes or 0), type = 'success', duration = 10000 })
+end
+
 -- Only runs while I am on a station; idles otherwise. An imaging table holds
 -- the patient (movement off); walking away from a bed counts as getting up.
 CreateThread(function()
@@ -184,6 +219,7 @@ CreateThread(function()
     if #models == 0 then return end
 
     stationOccupied = lib.callback.await('dps-medical:stations', false) or {}
+    staffOnDuty = lib.callback.await('dps-medical:staffOnDuty', false) and true or false
     local me = GetPlayerServerId(PlayerId())
     local options = {}
 
@@ -237,7 +273,82 @@ CreateThread(function()
         end,
     }
 
+    -- Transfer (B3): a medic puts the nearest conscious patient on a free station.
+    options[#options + 1] = {
+        name = 'dps_medical_station_transfer',
+        icon = 'fas fa-people-carry',
+        label = 'Transfer patient here',
+        distance = Config.StationInteractDistance or 3.0,
+        canInteract = function(entity)
+            if not isMedic() then return false end
+            local id = stationForEntity(entity)
+            if not id or stationOccupied[id] ~= nil or id == myStation then return false end
+            local player = lib.getClosestPlayer(GetEntityCoords(PlayerPedId()), Config.TransferDistance or 3.0, false)
+            return player ~= nil
+        end,
+        onSelect = function(data)
+            local id, st = stationForEntity(data.entity)
+            if not id then return end
+            local player = lib.getClosestPlayer(GetEntityCoords(PlayerPedId()), Config.TransferDistance or 3.0, false)
+            if not player then
+                lib.notify({ description = 'Nobody next to you to transfer.', type = 'error' })
+                return
+            end
+            local target = GetPlayerServerId(player)
+            local check = lib.callback.await('dps-medical:transferCheck', false, id, target)
+            if not check or not check.ok then
+                lib.notify({ description = (check and check.line or 'No.') .. (check and check.hint and ('\n' .. check.hint) or ''), type = 'error', duration = 8000 })
+                return
+            end
+            local done = lib.progressBar({
+                duration = (check.seconds or 15) * 1000,
+                label = ('Moving patient to the %s'):format(Config.StationKinds[st.kind] and Config.StationKinds[st.kind].label or st.kind),
+                useWhileDead = false, canCancel = true,
+                disable = { move = true, car = true, combat = true },
+                anim = { dict = 'missfinale_c2ig_11', clip = 'pushcar_offcliff_m', flag = 49 },
+            })
+            if not done then return end
+            local res = lib.callback.await('dps-medical:transferCommit', false, id, target)
+            lib.notify({ description = res and res.line or 'No.', type = (res and res.ok) and 'success' or 'error' })
+        end,
+    }
+
+    -- The desk (B4): only for the patient, only on a bed, only with no staff on duty.
+    options[#options + 1] = {
+        name = 'dps_medical_station_desk',
+        icon = 'fas fa-bell-concierge',
+        label = 'Request treatment (no staff on duty)',
+        distance = Config.StationInteractDistance or 3.0,
+        canInteract = function(entity)
+            if staffOnDuty or not feelingIll() then return false end
+            local id, st = stationForEntity(entity)
+            return id ~= nil and st.kind == 'bed' and id == myStation
+        end,
+        onSelect = function() requestDesk() end,
+    }
+
     exports.ox_target:addModel(models, options)
+
+    -- wasabi's own beds get exactly one option from us, the desk request:
+    -- lying down there stays wasabi's, and the server reads the bed back from
+    -- wasabi (getPlayerBed) to check the patient is really on it.
+    local wasabiModels, wseen = {}, {}
+    for _, st in pairs(Config.Stations) do
+        if st.wasabiBed and st.prop and not wseen[st.prop] then
+            wseen[st.prop] = true
+            wasabiModels[#wasabiModels + 1] = type(st.prop) == 'number' and st.prop or joaat(st.prop)
+        end
+    end
+    if #wasabiModels > 0 then
+        exports.ox_target:addModel(wasabiModels, {{
+            name = 'dps_medical_wasabibed_desk',
+            icon = 'fas fa-bell-concierge',
+            label = 'Request treatment (no staff on duty)',
+            distance = Config.StationInteractDistance or 3.0,
+            canInteract = function() return not staffOnDuty and feelingIll() end,
+            onSelect = function() requestDesk() end,
+        }})
+    end
 end)
 
 -- /stationcapture <kind> <facility name>: stand where the patient should be,

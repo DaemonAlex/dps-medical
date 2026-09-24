@@ -330,6 +330,9 @@ CreateThread(function()
             end
         end
 
+        -- Desk admissions (no staff on duty): the clock runs only on the bed.
+        if tickAdmissions then tickAdmissions() end
+
         -- Mirror what the SQL above changed back into memory, then push fresh
         -- state to everyone who is online and unwell.
         for _, src in ipairs(GetPlayers()) do
@@ -891,6 +894,215 @@ exports('stationOf', function(src)
     local sid = cid and patientStation[cid]
     return sid, sid and Config.Stations[sid] or nil
 end)
+
+-- ===========================================================================
+-- Staff on duty - the gate for the desk fallback
+-- ===========================================================================
+
+local staffOnDuty = false
+
+---@return number
+local function countStaffOnDuty()
+    local n = 0
+    for _, src in ipairs(GetPlayers()) do
+        local player = exports.qbx_core:GetPlayer(tonumber(src))
+        local job = player and player.PlayerData and player.PlayerData.job
+        if job and job.onduty then
+            for i = 1, #Config.MedicalJobs do
+                if Config.MedicalJobs[i] == job.name then n = n + 1 break end
+            end
+        end
+    end
+    return n
+end
+
+-- Pushed to every client only when the answer changes, so the target option
+-- appears and disappears without anyone polling.
+local function refreshStaff()
+    local now = countStaffOnDuty() > 0
+    if now ~= staffOnDuty then
+        staffOnDuty = now
+        TriggerClientEvent('dps-medical:client:staff', -1, staffOnDuty)
+        debug('medical staff on duty: %s', tostring(staffOnDuty))
+    end
+end
+
+AddEventHandler('QBCore:Server:OnJobUpdate', function() SetTimeout(250, refreshStaff) end)
+AddEventHandler('qbx_core:server:onJobUpdate', function() SetTimeout(250, refreshStaff) end)
+AddEventHandler('QBCore:Server:SetDuty', function() SetTimeout(250, refreshStaff) end)
+AddEventHandler('qbx_core:server:playerLoaded', function() SetTimeout(250, refreshStaff) end)
+AddEventHandler('qbx_core:server:playerUnloaded', function() SetTimeout(1000, refreshStaff) end)
+CreateThread(function() Wait(3000) refreshStaff() end)
+
+lib.callback.register('dps-medical:staffOnDuty', function() return staffOnDuty end)
+
+-- ===========================================================================
+-- Transfer - a medic moves a conscious patient onto a free station (B3)
+-- ===========================================================================
+
+---@param src number medic
+---@param sid string destination station
+---@param targetSrc number patient
+---@return table? station, string? line, string? hintKey
+local function canTransfer(src, sid, targetSrc)
+    if not isMedic(src) then return nil, 'You are not medical staff.' end
+    local st = Config.Stations[sid]
+    if not st then return nil, 'No such station.' end
+    if st.wasabiBed then return nil, 'That bed is run by the hospital desk - use its own menu.' end
+    if stationOccupant[sid] then return nil, 'Someone is already on it.' end
+    if not nearStation(src, st) then return nil, 'Get to the station first.', 'transfer' end
+    targetSrc = tonumber(targetSrc)
+    if not targetSrc or targetSrc == src then return nil, 'Pick a patient.', 'transfer' end
+    local cid = cidOf(targetSrc)
+    if not cid then return nil, 'No patient there.' end
+    local medPed, patPed = GetPlayerPed(src), GetPlayerPed(targetSrc)
+    if medPed == 0 or patPed == 0 then return nil, 'No patient there.' end
+    if #(GetEntityCoords(medPed) - GetEntityCoords(patPed)) > (Config.TransferDistance or 3.0) + 1.0 then
+        return nil, 'Get next to the patient.', 'transfer'
+    end
+    local dead = false
+    pcall(function() dead = exports.wasabi_ambulance_v2:isPlayerDead(targetSrc) end)
+    if dead then return nil, 'That needs a stretcher, not a transfer.' end
+    return st
+end
+
+-- Two steps so the medic's progress bar sits between them: check, then commit
+-- with the same checks again (the station may have filled meanwhile).
+lib.callback.register('dps-medical:transferCheck', function(src, sid, targetSrc)
+    local st, line, hint = canTransfer(src, sid, targetSrc)
+    if not st then return { ok = false, line = line, hint = hint and hintFor(src, hint) or nil } end
+    return { ok = true, seconds = st.transferSeconds or 15 }
+end)
+
+lib.callback.register('dps-medical:transferCommit', function(src, sid, targetSrc)
+    local st, line, hint = canTransfer(src, sid, targetSrc)
+    if not st then return { ok = false, line = line, hint = hint and hintFor(src, hint) or nil } end
+    targetSrc = tonumber(targetSrc)
+    local cid = cidOf(targetSrc)
+    if patientStation[cid] then vacateStation(cid, 'transferred') end
+
+    stationOccupant[sid] = { cid = cid, src = targetSrc, since = os.time() }
+    patientStation[cid] = sid
+    local kind = Config.StationKinds[st.kind] or {}
+    local staffName, staffJob = whoIs(src)
+    recordVisit(cid, {
+        event_type = 'transfer',
+        staff_citizenid = cidOf(src), staff_name = staffName, staff_job = staffJob,
+        notes = ('Transferred to %s at %s'):format(kind.label or st.kind, st.facility or '?'),
+    })
+    broadcastStations()
+    TriggerClientEvent('dps-medical:client:placed', targetSrc, sid, st.slot, st.anim or kind.anim, kind.label or st.kind, st.facility)
+    return { ok = true, line = ('Patient on the %s.'):format(kind.label or st.kind) }
+end)
+
+-- ===========================================================================
+-- The desk - treatment when no staff is on duty (B4)
+-- ===========================================================================
+--
+-- A patient on a bed asks the desk. The desk never names a condition: it
+-- reads the symptoms back as a workup line, takes the fee, and clears each
+-- condition after severity * minutesPerSeverity spent ON THE BED. Off the bed
+-- the clock stops. Staff coming on duty hides the option; staff treating the
+-- patient ends the stay early because the conditions are simply gone.
+
+admissions = {}   -- citizenid -> { sid, left = { [conditionId] = seconds }, lastTick }
+
+---Charge a player, bank first then cash.
+---@param src number
+---@param amount number
+---@return boolean
+local function charge(src, amount)
+    if amount <= 0 then return true end
+    local player = exports.qbx_core:GetPlayer(src)
+    if not player then return false end
+    local money = player.PlayerData.money or {}
+    if (money.bank or 0) >= amount and player.Functions.RemoveMoney('bank', amount, 'dps-medical desk') then return true end
+    if (money.cash or 0) >= amount and player.Functions.RemoveMoney('cash', amount, 'dps-medical desk') then return true end
+    return false
+end
+
+lib.callback.register('dps-medical:npcRequest', function(src)
+    local cid = cidOf(src)
+    if not cid then return { ok = false, line = 'No.' } end
+    if staffOnDuty then return { ok = false, line = 'Medical staff are on duty - they will see you.' } end
+    if admissions[cid] then return { ok = false, line = 'You are already admitted. Stay on the bed.' } end
+    local sid, st = stationOfPatient(cid, src)
+    if not st or st.kind ~= 'bed' then return { ok = false, line = 'Lie on a bed first.' } end
+
+    local left, symptoms, seen, totalSev, longest = {}, {}, {}, 0, 0
+    for id, row in pairs(conditions[cid] or {}) do
+        local def = Config.Conditions[row.condition_key]
+        if def and row.stage == 'symptomatic' then
+            local sev = math.max(1, tonumber(row.severity) or 1)
+            local secs = sev * (Config.Npc.minutesPerSeverity or 10) * 60
+            left[id] = secs
+            totalSev = totalSev + sev
+            if secs > longest then longest = secs end
+            for _, s in ipairs(def.symptoms or {}) do
+                if not seen[s] then
+                    seen[s] = true
+                    symptoms[#symptoms + 1] = Config.Symptoms[s] and Config.Symptoms[s].label or s
+                end
+            end
+        end
+    end
+    if totalSev == 0 then return { ok = false, line = 'The desk finds nothing to treat. Rest.' } end
+
+    local cost = totalSev * (Config.Npc.costPerSeverity or 0)
+    if not charge(src, cost) then return { ok = false, line = ('The desk wants $%d up front.'):format(cost) } end
+
+    table.sort(symptoms)
+    local finding = (Config.Npc.workup or 'Desk workup: %s'):format(table.concat(symptoms, ', '))
+    admissions[cid] = { sid = sid, left = left, lastTick = os.time() }
+    recordVisit(cid, {
+        event_type = 'admission', staff_name = 'Desk', staff_job = 'desk',
+        notes = finding, data = { cost = cost, minutes = math.ceil(longest / 60) },
+    })
+    debug('%s admitted by the desk on %s: $%d, %d min', cid, sid, cost, math.ceil(longest / 60))
+    return { ok = true, line = finding, minutes = math.ceil(longest / 60), cost = cost }
+end)
+
+---Advance every admission by the time since the last tick, but only for
+---patients still on their bed. Called from the tick thread.
+function tickAdmissions()
+    local now = os.time()
+    local online = {}
+    for _, src in ipairs(GetPlayers()) do
+        local cid = cidOf(tonumber(src))
+        if cid then online[cid] = tonumber(src) end
+    end
+    for cid, adm in pairs(admissions) do
+        local src = online[cid]
+        local elapsed = now - adm.lastTick
+        adm.lastTick = now
+        local onBed = src and select(1, stationOfPatient(cid, src)) == adm.sid
+        local remaining = 0
+        for id, secs in pairs(adm.left) do
+            local row = conditions[cid] and conditions[cid][id]
+            if not row then
+                adm.left[id] = nil                       -- treated or recovered some other way
+            else
+                if onBed then secs = secs - elapsed end
+                if secs <= 0 then
+                    adm.left[id] = nil
+                    resolve(cid, id, 'treated')
+                else
+                    adm.left[id] = secs
+                    remaining = remaining + 1
+                end
+            end
+        end
+        if remaining == 0 then
+            admissions[cid] = nil
+            recordVisit(cid, { event_type = 'discharge', staff_name = 'Desk', staff_job = 'desk', notes = 'Discharged by the desk' })
+            if src then
+                TriggerClientEvent('ox_lib:notify', src, { description = 'The desk discharges you. You can get up.', type = 'success', duration = 8000 })
+            end
+        elseif src and not onBed then
+            TriggerClientEvent('ox_lib:notify', src, { description = 'Your treatment is paused until you are back on the bed.', type = 'inform' })
+        end
+    end
+end
 
 -- /stationcapture: the client raycasts the prop the admin is looking at and
 -- sends the numbers here. Appended to station_captures.txt inside this
