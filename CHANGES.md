@@ -184,6 +184,31 @@ numbers marked TUNE.
 grade get a hint on every refusal (station, confirm, treat_undiagnosed)
 explaining what to do instead; above it, nothing.
 
+## 2026-09-24 — B3 transfer, B4 desk fallback
+
+**Transfer (B3).** `dps-medical:transferCheck` / `transferCommit` (server) and a
+"Transfer patient here" target option on every station we own (client). Medic
+must be at the station and within `Config.TransferDistance` of the patient; the
+patient must be alive (wasabi `isPlayerDead`) and the station free — checked
+before the progress bar and again at commit. The patient's client gets
+`dps-medical:client:placed` and takes the slot; a `transfer` visit row carries
+the staff name. wasabi beds are refused: lying down there is wasabi's.
+
+**The desk (B4).** Server tracks whether anyone from `Config.MedicalJobs` is on
+duty (`countStaffOnDuty`, refreshed on job/duty/load/unload events and every
+tick) and pushes `dps-medical:client:staff` only on change. With nobody on duty,
+a symptomatic patient on a bed — including wasabi's beds, read back through
+`getPlayerBed` — can `npcRequest`: the desk builds a workup line from the
+symptom labels, charges `Σ severity × Config.Npc.costPerSeverity` (bank, then
+cash), and records an `admission`. `tickAdmissions()` runs in the tick thread:
+each condition's remaining seconds only count down while the patient is on the
+admitting bed; at zero it is `resolve(..., 'treated')`; when nothing is left the
+stay ends with a `discharge` row and a notify. Conditions gone by other means
+(a medic treated them) drop out of the stay automatically.
+
+**Not done:** B5 (station id, kind and admission on the chart) waits on the
+self-view decision.
+
 ## Verify
 
 ```

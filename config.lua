@@ -53,6 +53,23 @@ Config.SeverityWords = { [1] = 'mild', [2] = 'getting worse', [3] = 'severe', [4
 -- How close a medic must be to give a patient a medication, in metres.
 Config.AdministerDistance = 3.0
 
+-- Transfer (B3). A medic moves a CONSCIOUS patient onto a free station:
+-- target the station, "Transfer patient here", the nearest player within this
+-- distance is the patient. Downed players go on wasabi's stretcher, not this.
+Config.TransferDistance = 3.0
+
+-- No staff on duty (B4). When nobody from Config.MedicalJobs is on duty, a
+-- patient lying on a bed can ask the desk for treatment. The desk runs a
+-- generic workup (a finding line, never a condition name), charges up front,
+-- and clears each condition after severity * minutesPerSeverity on the bed.
+-- The clock only runs while the patient is on the bed. The option is hidden
+-- the moment a medic goes on duty; a medic treating the patient ends the stay.
+Config.Npc = {
+    minutesPerSeverity = 10,
+    costPerSeverity = 250,
+    workup = 'Desk workup: %s. Admitted for observation.',
+}
+
 -- Breadcrumbs. Staff below this job grade get a hint on every refusal telling
 -- them what to do instead; from this grade up the system assumes they know.
 Config.HintsBelowGrade = 3
@@ -61,6 +78,7 @@ Config.Hints = {
     station = 'Hospital tests run on the equipment: have the patient lie on the bed or sit at the lab (target the prop), then run the test standing next to it.',
     confirm = 'You can suspect it, but the chart only takes a diagnosis a test has confirmed. Run the blood panel or the right scan first, then /diagnose.',
     treat_undiagnosed = 'Medication only goes on a diagnosed condition. Confirm it with a test, /diagnose it, then treat.',
+    transfer = 'Stand next to the patient, target the free station and pick "Transfer patient here". Downed patients go on the stretcher instead.',
 }
 
 -- Set true to print every infection and progression to the server console.

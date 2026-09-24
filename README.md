@@ -157,6 +157,29 @@ Staff below `Config.HintsBelowGrade` get a hint on every refusal telling them
 what to do instead ("have the patient lie on the bed, then run the test next to
 it"). From that grade up the system assumes they know.
 
+### Transfer
+
+A medic moves a conscious patient onto a free station: stand next to the
+patient, target the station, **Transfer patient here**. The nearest player
+within `Config.TransferDistance` is the patient; the server re-checks the
+station is still free after the `transferSeconds` progress bar, then places
+the patient on the slot with the station's animation and writes a `transfer`
+visit row. Dead patients are refused (wasabi's stretcher moves the downed);
+wasabi's own beds are refused (wasabi owns lying down there).
+
+### The desk (no staff on duty)
+
+When nobody from `Config.MedicalJobs` is on duty, a symptomatic patient lying
+on a bed — ours or one of wasabi's — gets **Request treatment** on the bed.
+The desk reads the symptoms back as a workup line (never a condition name),
+charges `severity × Config.Npc.costPerSeverity` for every active condition,
+bank first then cash, and clears each condition after
+`severity × Config.Npc.minutesPerSeverity` minutes spent *on the bed*: leaving
+pauses the clock and says so. The option disappears the moment a medic goes on
+duty (the server pushes the on-duty state; nothing polls). A medic treating
+the patient ends the stay early because the conditions are simply gone.
+Visits: `admission` (with cost and minutes) and `discharge`, staff `Desk`.
+
 ### Conditions shipped
 
 | Key | Label | Symptoms | Incubation | Contagious | Treatment |
@@ -208,6 +231,10 @@ own** — someone has to treat it.
   a station (see *Stations*).
 
 ## Configuration (`config.lua`)
+
+- `Config.TransferDistance` — medic-to-patient reach for a transfer (3 m).
+- `Config.Npc` — `minutesPerSeverity`, `costPerSeverity`, `workup` (the desk's
+  finding line; `%s` is the symptom list).
 
 | Key | Default | Meaning |
 |---|---|---|
