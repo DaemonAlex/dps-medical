@@ -456,3 +456,21 @@ Config.Conditions = {
         },
     },
 }
+
+-- ---------------------------------------------------------------------------
+-- Mobility aid (wasabi_crutch). How long a patient leaves treatment on crutches
+-- or in a wheelchair, worked out from the worst leg trauma seen since their last
+-- discharge: minutes per injury type on a leg, plus perExtraStack for each repeat
+-- of the same injury. Both legs hurt, or a long sentence, means a wheelchair.
+-- wasabi_ambulance's own flat hand-off is switched off; this owns it.
+-- ---------------------------------------------------------------------------
+Config.MobilityAid = {
+    enabled = true,
+    legs = { 5, 6 },                                   -- wasabi limb indexes: 5 = left leg, 6 = right leg
+    minutes = { brokenbone = 20, gunshot = 12, burn = 8, blunt = 6, cut = 4, fist = 0, taser = 0 },
+    perExtraStack = 3,                                 -- each repeat of the same injury on that leg
+    maxMinutes = 30,                                   -- keep equal to wasabi_crutch Config.maxAssignTime
+    wheelchairFrom = 20,                               -- this many minutes, or both legs, puts them in a wheelchair
+    respawnMinutes = 15,                               -- died with no leg record: they still limp out of the hospital
+    repeatGuardSeconds = 120,                          -- one hand-off per treatment even if revive and respawn both fire
+}

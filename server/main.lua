@@ -487,6 +487,85 @@ exports('useMedication', function(event, item, inventory, slot)
 end)
 
 -- ===========================================================================
+-- Mobility aid: crutches and wheelchairs by injury (wasabi_crutch)
+-- ===========================================================================
+--
+-- wasabi's limb data carries counts per injury type. We keep the worst leg
+-- state seen since the last discharge (healing zeroes the live counts, so the
+-- record is kept apart) and hand the patient a crutch or a wheelchair when a
+-- treatment or a respawn completes. Sentence length comes from Config.MobilityAid.
+
+local legRecord = {}   -- citizenid -> { [limbIndex] = { [injuryType] = worst count } }
+local lastAidAt = {}   -- citizenid -> os.time() of the last hand-off (repeat guard)
+
+local function rememberLegs(cid, limbs)
+    local cfg = Config.MobilityAid
+    if not cfg or cfg.enabled == false then return end
+    for _, limbIndex in ipairs(cfg.legs or {}) do
+        local limb = limbs[limbIndex]
+        if type(limb) == 'table' and type(limb.injuries) == 'table' then
+            for injuryType, count in pairs(limb.injuries) do
+                count = tonumber(count) or 0
+                if count > 0 and (cfg.minutes[injuryType] or 0) > 0 then
+                    legRecord[cid] = legRecord[cid] or {}
+                    legRecord[cid][limbIndex] = legRecord[cid][limbIndex] or {}
+                    local worst = legRecord[cid][limbIndex][injuryType] or 0
+                    if count > worst then legRecord[cid][limbIndex][injuryType] = count end
+                end
+            end
+        end
+    end
+end
+
+local function dischargeAid(src, cid, reason)
+    local cfg = Config.MobilityAid
+    if not cfg or cfg.enabled == false then return end
+    if GetResourceState('wasabi_crutch') ~= 'started' then return end
+    local now = os.time()
+    if lastAidAt[cid] and now - lastAidAt[cid] < (cfg.repeatGuardSeconds or 120) then return end
+
+    local rec = legRecord[cid]
+    legRecord[cid] = nil
+    local minutes, legs, detail = 0, 0, {}
+    if rec then
+        for limbIndex, injuries in pairs(rec) do
+            local legMinutes = 0
+            for injuryType, count in pairs(injuries) do
+                local base = cfg.minutes[injuryType] or 0
+                if base > 0 and count > 0 then
+                    legMinutes = legMinutes + base + (count - 1) * (cfg.perExtraStack or 0)
+                    detail[#detail + 1] = ('%s %s x%d'):format(limbIndex == 5 and 'left leg' or 'right leg', injuryType, count)
+                end
+            end
+            if legMinutes > 0 then
+                legs = legs + 1
+                minutes = minutes + legMinutes
+            end
+        end
+    elseif reason == 'respawn' then
+        minutes = cfg.respawnMinutes or 0
+        detail[1] = 'no leg record before death'
+    end
+    if minutes <= 0 then return end
+
+    minutes = math.min(math.floor(minutes + 0.5), cfg.maxMinutes or 30)
+    local chair = legs >= 2 or minutes >= (cfg.wheelchairFrom or math.huge)
+    lastAidAt[cid] = now
+    TriggerClientEvent(chair and 'wasabi_crutch:giveChair' or 'wasabi_crutch:giveCrutch', src, minutes)
+    recordVisit(cid, {
+        event_type = 'mobility',
+        notes = ('%s for %d min: %s'):format(chair and 'Wheelchair' or 'Crutches', minutes, table.concat(detail, ', ')),
+        data = { minutes = minutes, aid = chair and 'wheelchair' or 'crutch', reason = reason },
+    })
+end
+
+AddEventHandler('wasabi_ambulance:Server:Listeners:OnRespawn', function(src, facilityId, coords)
+    local cid = cidOf(src)
+    if not cid then return end
+    dischargeAid(src, cid, 'respawn')
+end)
+
+-- ===========================================================================
 -- wasabi_ambulance listeners
 -- ===========================================================================
 --
@@ -516,6 +595,7 @@ AddEventHandler('wasabi_ambulance:Server:Listeners:OnRevive', function(src, revi
         staff_citizenid = staffCid, staff_name = staffName, staff_job = staffJob,
         notes = ('Revived (%s)'):format(method or 'unknown'),
     })
+    if method == 'hospital' then dischargeAid(src, cid, 'hospital') end
 end)
 
 AddEventHandler('wasabi_ambulance:Server:Listeners:OnHealingItemUsed', function(src, itemName, healAmount, healerId)
@@ -542,6 +622,7 @@ AddEventHandler('wasabi_ambulance:Server:Listeners:OnFacilityHeal', function(src
         notes = ('Treated at %s'):format(facilityName or ('facility ' .. tostring(facilityId))),
         data = { cost = cost },
     })
+    dischargeAid(src, cid, 'facility')
 end)
 
 -- Trauma can cause illness. This is the join between wasabi's half and ours:
@@ -553,6 +634,7 @@ AddEventHandler('wasabi_ambulance:Server:Listeners:OnInjuryUpdate', function(src
     -- Keep the latest limb state so a medic's tablet can show trauma without
     -- having to ask the patient's own client for it.
     lastLimbs[cid] = limbs
+    rememberLegs(cid, limbs)
 
     -- Track how long each wound has been open. wasabi's limb data carries no
     -- timestamps, so the first time we see a wound is when its clock starts;
