@@ -1458,8 +1458,14 @@ lib.callback.register('dps-medical:getChartFor', function(src, targetSrc)
         }
     end
 
+    -- Which body map figure the chart shows: the patient's character (qbx gender 1 = female).
+    local sex = 'male'
+    local target = exports.qbx_core:GetPlayer(targetSrc)
+    local gender = target and target.PlayerData and target.PlayerData.charinfo and target.PlayerData.charinfo.gender
+    if gender == 1 or gender == '1' or gender == 'female' then sex = 'female' end
+
     return {
-        patient = { name = name, citizenid = cid },
+        patient = { name = name, citizenid = cid, sex = sex },
         body = body,
         bleeding = 0,
         conditions = conds,
