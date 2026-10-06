@@ -462,10 +462,12 @@ Config.Conditions = {
 -- or in a wheelchair, worked out from the worst leg trauma seen since their last
 -- discharge: minutes per injury type on a leg, plus perExtraStack for each repeat
 -- of the same injury. Both legs hurt, or a long sentence, means a wheelchair.
--- wasabi_ambulance's own flat hand-off is switched off; this owns it.
+-- DPS 2026-10-06 (Damon): OFF. Crutches now come from wasabi_ambulance_v2's own
+-- hand-off (config.wasabiCrutch, 10 min); "that functionality in one place".
+-- Turn back on only if the wasabi hand-off is switched off again.
 -- ---------------------------------------------------------------------------
 Config.MobilityAid = {
-    enabled = true,
+    enabled = false,
     legs = { 5, 6 },                                   -- wasabi limb indexes: 5 = left leg, 6 = right leg
     minutes = { brokenbone = 20, gunshot = 12, burn = 8, blunt = 6, cut = 4, fist = 0, taser = 0 },
     perExtraStack = 3,                                 -- each repeat of the same injury on that leg
