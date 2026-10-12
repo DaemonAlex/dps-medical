@@ -318,6 +318,30 @@ Config.Stations = {
     -- ---- Ocean Medical Center: lab and imaging ------------------------------
     -- Captured in game with /stationcapture; paste the blocks from
     -- station_captures.txt here. Until a kind exists its tests refuse.
+    -- Set by spot (Damon, in game 2026-10-12): the equipment is part of the
+    -- building and cannot be targeted, so each is an interaction sphere at the
+    -- spot he stood on. Heading: X-ray and CT face like wasabi bed 23 beside
+    -- them (136); the lab and MRI use 0 until checked in game.
+    omc_bloodlab_1 = {
+        facility = 'Ocean Medical Center', kind = 'bloodlab', spot = true,
+        coords = vec4(-1826.33, -352.23, 49.45, 0.0),
+        slot   = vec4(-1826.33, -352.23, 49.45, 0.0),
+    },
+    omc_xray_1 = {
+        facility = 'Ocean Medical Center', kind = 'xray', spot = true,
+        coords = vec4(-1875.43, -331.56, 53.75, 136.0),
+        slot   = vec4(-1875.43, -331.56, 53.75, 136.0),
+    },
+    omc_ct_1 = {
+        facility = 'Ocean Medical Center', kind = 'ct', spot = true,
+        coords = vec4(-1877.69, -328.52, 53.75, 136.0),
+        slot   = vec4(-1877.69, -328.52, 53.75, 136.0),
+    },
+    omc_mri_1 = {
+        facility = 'Ocean Medical Center', kind = 'mri', spot = true,
+        coords = vec4(-1856.52, -356.00, 41.25, 0.0),
+        slot   = vec4(-1856.52, -356.00, 41.25, 0.0),
+    },
 }
 
 -- ===========================================================================
