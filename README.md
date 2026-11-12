@@ -346,6 +346,10 @@ it inside its app frame, and wasabi's inspection UI receives it by
 
 See `CHANGES.md` for the full review brief and the questions still open.
 
+## Author
+
+Made by [DaemonAlex](https://github.com/DaemonAlex) for DelPerroSands.
+
 ## Other DPS scripts
 
 All of these are made for DelPerroSands and run together on one Qbox server. Each one works on
