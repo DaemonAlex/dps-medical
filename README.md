@@ -8,6 +8,32 @@ a medic finds out, and the chart that follows the patient around.
 Version 0.1.0. `CHANGES.md` is the review brief for this import; this file is
 how the thing works.
 
+## What it is for
+
+A paid ambulance script knows you were shot. It does not know you have the flu, that you caught
+it from the person next to you, or that the cut you ignored yesterday is now infected. This adds
+that half, and gives medics a reason to examine a patient before treating them.
+
+## On its own, and with other scripts
+
+**It is a companion, not a standalone.** It needs wasabi_ambulance_v2 and does not replace any
+part of it. Injuries, bleeding, death and revive stay exactly as the paid script does them. This
+resource only listens. It never changes wasabi's files or state, so a wasabi update does not
+break it.
+
+**With wasabi_ambulance_v2 alone.** Illness, contagion, diagnostic tests, hospital stations and a
+patient chart, all from commands and menus.
+
+**With lb-tablet.** The chart becomes a tablet app medics carry.
+
+**With [dps-inventory](https://github.com/DaemonAlex/dps-inventory).** Patients see their own
+symptoms and confirmed diagnoses on the inventory screen's status panel, next to their injuries.
+Hidden and incubating illness is never sent, so the diagnosis is still the medic's to make.
+`client/inventory_status.lua` does this and does nothing if that inventory is not running.
+
+**With [dps-insurance](https://github.com/DaemonAlex/dps-insurance).** A hospital visit is
+recorded against the patient's cover.
+
 ## The one design rule
 
 - **Trauma belongs to wasabi_ambulance_v2.** It models 6 limbs × 7 injury types
@@ -319,3 +345,31 @@ it inside its app frame, and wasabi's inspection UI receives it by
 - No test suite.
 
 See `CHANGES.md` for the full review brief and the questions still open.
+
+## Other DPS scripts
+
+All of these are made for DelPerroSands and run together on one Qbox server. Each one works on
+its own. The ones marked "pairs with" do more when both are running.
+
+| Script | What it does |
+|---|---|
+| [dps-inventory](https://github.com/DaemonAlex/dps-inventory) | The inventory: ox_inventory with equipment slots, backpacks, armour plates and a self status panel, in the DelPerroSands colours. |
+| [dps-insurance](https://github.com/DaemonAlex/dps-insurance) | Ties m-Insurance into the MDT, impound, hospital and medical chart. Pairs with dps-medical. |
+| [dps-studio](https://github.com/DaemonAlex/dps-studio) | Build rooms, doors and portals in game from one panel (`/studio`), with owners and managers so staff do not have to support them. |
+| [dps-shops](https://github.com/DaemonAlex/dps-shops) | Shop clerks who greet and react to a robbery, then player-owned shops. |
+| [dps-fleet](https://github.com/DaemonAlex/dps-fleet) | Vehicle browser and workshop on one panel: extras, liveries and mods for emergency vehicles. |
+| [dps-parking](https://github.com/DaemonAlex/dps-parking) | Parking with valet, impound, violations and reserved spots. |
+| [dps-vehiclepersistence](https://github.com/DaemonAlex/dps-vehiclepersistence) | Vehicles stay where they were parked. Pairs with dps-parking. |
+| [dps-towjob](https://github.com/DaemonAlex/dps-towjob) | Queue-based tow job with jg-mechanic integration. |
+| [dps-services](https://github.com/DaemonAlex/dps-services) | Request a tow and follow it live on the lb-phone and lb-tablet. Pairs with dps-towjob. |
+| [dps-autoshops](https://github.com/DaemonAlex/dps-autoshops) | Self-service repair shops when no mechanic is on duty. |
+| [dps-cityworker](https://github.com/DaemonAlex/dps-cityworker) | City infrastructure job and career. |
+| [dps-ainpcs](https://github.com/DaemonAlex/dps-ainpcs) | NPCs you can talk to, with trust, quests and intel. |
+| [dps-badpeds](https://github.com/DaemonAlex/dps-badpeds) | Police interaction with NPCs: stops, arrests, intel and jail records. |
+| [dps-gangwars](https://github.com/DaemonAlex/dps-gangwars) | Ambient gang NPCs, territory population and war reinforcements. |
+| [dps-rotations](https://github.com/DaemonAlex/dps-rotations) | Moves dealers, harvests and other spots on a fixed schedule. |
+| [dps-trains](https://github.com/DaemonAlex/dps-trains) | The train system. Pairs with dps-trains-stock, dps-traintools and dps-transitapp. |
+| [dps-transitapp](https://github.com/DaemonAlex/dps-transitapp) | Live train arrival boards on the lb-phone. |
+| [dps-faceplant](https://github.com/DaemonAlex/dps-faceplant) | City help, reports and staff tools on the lb-phone and lb-tablet. |
+| [dps-chat](https://github.com/DaemonAlex/dps-chat) | A command box for voice-only servers. No chat feed. |
+| [dps-filmmode](https://github.com/DaemonAlex/dps-filmmode) | One key hides every HUD layer and gives a smooth free camera for recording. |

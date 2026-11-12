@@ -87,9 +87,9 @@
 <body>
 <div class="app">
   <header>
-    <span class="mark">D</span>
+    <img src="dps-logo.svg" alt="DelPerroSands" style="height:26px;width:auto;flex:none"><!-- DPS 2026-10-10: house logo replaces the "D" mark -->
     <div>
-      <h1>DPS Medical</h1>
+      <h1>Medical</h1>
       <div class="sub">Patient chart</div>
     </div>
     <span class="spacer"></span>
@@ -173,7 +173,9 @@
     }
 
     who.innerHTML = '<div class="n">' + esc(data.patient.name || "Unknown") + '</div>' +
-                    '<div class="s">' + esc(data.patient.citizenid || "") + '</div>';
+                    '<div class="s">' + esc(data.patient.citizenid || "") + '</div>' +
+                    (data.patient.insured === undefined || data.patient.insured === null ? '' :
+                      '<div class="s">Health insurance: ' + (data.patient.insured ? 'Yes' : 'No') + '</div>');
 
     var html = "";
 

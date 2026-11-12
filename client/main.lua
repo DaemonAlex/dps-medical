@@ -83,20 +83,35 @@ RegisterNetEvent('dps-medical:client:stations', function(map)
     stationOccupied = map or {}
 end)
 
----The station this map object IS: same model, within a couple of metres.
----@param entity number
+---The station this map object IS: same model, within a couple of metres. For a
+---station set by spot (spot = true: the equipment is part of the building and
+---cannot be targeted) the zone's coords say which one it is.
+---@param entity number?
+---@param coords vector3?
 ---@return string? id, table? station
-local function stationForEntity(entity)
-    if not entity or entity == 0 then return nil end
-    local model = GetEntityModel(entity)
-    local pos = GetEntityCoords(entity)
+local function stationForEntity(entity, coords)
     local bestId, best, bestD = nil, nil, 2.5
-    for id, st in pairs(Config.Stations) do
-        local h = type(st.prop) == 'number' and st.prop or joaat(st.prop)
-        -- wasabi's own facility beds keep wasabi's menu; we never add ours on top.
-        if h == model and not st.wasabiBed then
-            local d = #(pos - vec3(st.coords.x, st.coords.y, st.coords.z))
-            if d < bestD then bestId, best, bestD = id, st, d end
+    if entity and entity ~= 0 and DoesEntityExist(entity) then
+        local model = GetEntityModel(entity)
+        local pos = GetEntityCoords(entity)
+        for id, st in pairs(Config.Stations) do
+            if st.prop and not st.spot then
+                local h = type(st.prop) == 'number' and st.prop or joaat(st.prop)
+                -- wasabi's own facility beds keep wasabi's menu; we never add ours on top.
+                if h == model and not st.wasabiBed then
+                    local d = #(pos - vec3(st.coords.x, st.coords.y, st.coords.z))
+                    if d < bestD then bestId, best, bestD = id, st, d end
+                end
+            end
+        end
+        if bestId then return bestId, best end
+    end
+    if coords then
+        for id, st in pairs(Config.Stations) do
+            if st.spot then
+                local d = #(vec3(coords.x, coords.y, coords.z) - vec3(st.coords.x, st.coords.y, st.coords.z))
+                if d < bestD then bestId, best, bestD = id, st, d end
+            end
         end
     end
     return bestId, best
@@ -206,17 +221,19 @@ end)
 -- Target options on every station prop. One "use" option per kind so the
 -- label reads right ("Lie down" on a bed, "Sit for a sample" at the lab).
 CreateThread(function()
-    local models, seen = {}, {}
+    local models, seen, spots = {}, {}, {}
     for _, st in pairs(Config.Stations) do
         -- Beds that wasabi already runs (wasabiBed) get no options from us:
         -- "Lay in Bed" is wasabi's, and two lie-down menus on one bed is the
         -- parallel-system mistake this resource exists to avoid.
-        if st.prop and not st.wasabiBed and not seen[st.prop] then
+        if st.spot then
+            spots[#spots + 1] = st
+        elseif st.prop and not st.wasabiBed and not seen[st.prop] then
             seen[st.prop] = true
             models[#models + 1] = type(st.prop) == 'number' and st.prop or joaat(st.prop)
         end
     end
-    if #models == 0 then return end
+    if #models == 0 and #spots == 0 then return end
 
     stationOccupied = lib.callback.await('dps-medical:stations', false) or {}
     staffOnDuty = lib.callback.await('dps-medical:staffOnDuty', false) and true or false
@@ -229,13 +246,13 @@ CreateThread(function()
             icon = 'fas fa-procedures',
             label = kind.patientLabel or ('Use ' .. (kind.label or kindKey)),
             distance = Config.StationInteractDistance or 3.0,
-            canInteract = function(entity)
+            canInteract = function(entity, _, coords)
                 if myStation then return false end
-                local id, st = stationForEntity(entity)
+                local id, st = stationForEntity(entity, coords)
                 return id ~= nil and st.kind == kindKey and stationOccupied[id] == nil
             end,
             onSelect = function(data)
-                local id, st = stationForEntity(data.entity)
+                local id, st = stationForEntity(data.entity, data.coords)
                 if id then occupyStation(id, st) end
             end,
         }
@@ -246,8 +263,8 @@ CreateThread(function()
         icon = 'fas fa-walking',
         label = 'Get up',
         distance = Config.StationInteractDistance or 3.0,
-        canInteract = function(entity)
-            local id = stationForEntity(entity)
+        canInteract = function(entity, _, coords)
+            local id = stationForEntity(entity, coords)
             return id ~= nil and id == myStation
         end,
         onSelect = function() leaveStation() end,
@@ -258,14 +275,14 @@ CreateThread(function()
         icon = 'fas fa-user-nurse',
         label = 'Release patient',
         distance = Config.StationInteractDistance or 3.0,
-        canInteract = function(entity)
+        canInteract = function(entity, _, coords)
             if not isMedic() then return false end
-            local id = stationForEntity(entity)
+            local id = stationForEntity(entity, coords)
             local occ = id and stationOccupied[id]
             return occ ~= nil and occ ~= me
         end,
         onSelect = function(data)
-            local id = stationForEntity(data.entity)
+            local id = stationForEntity(data.entity, data.coords)
             local occ = id and stationOccupied[id]
             if not occ then return end
             local res = lib.callback.await('dps-medical:release', false, occ)
@@ -279,15 +296,15 @@ CreateThread(function()
         icon = 'fas fa-people-carry',
         label = 'Transfer patient here',
         distance = Config.StationInteractDistance or 3.0,
-        canInteract = function(entity)
+        canInteract = function(entity, _, coords)
             if not isMedic() then return false end
-            local id = stationForEntity(entity)
+            local id = stationForEntity(entity, coords)
             if not id or stationOccupied[id] ~= nil or id == myStation then return false end
             local player = lib.getClosestPlayer(GetEntityCoords(PlayerPedId()), Config.TransferDistance or 3.0, false)
             return player ~= nil
         end,
         onSelect = function(data)
-            local id, st = stationForEntity(data.entity)
+            local id, st = stationForEntity(data.entity, data.coords)
             if not id then return end
             local player = lib.getClosestPlayer(GetEntityCoords(PlayerPedId()), Config.TransferDistance or 3.0, false)
             if not player then
@@ -319,15 +336,24 @@ CreateThread(function()
         icon = 'fas fa-bell-concierge',
         label = 'Request treatment (no staff on duty)',
         distance = Config.StationInteractDistance or 3.0,
-        canInteract = function(entity)
+        canInteract = function(entity, _, coords)
             if staffOnDuty or not feelingIll() then return false end
-            local id, st = stationForEntity(entity)
+            local id, st = stationForEntity(entity, coords)
             return id ~= nil and st.kind == 'bed' and id == myStation
         end,
         onSelect = function() requestDesk() end,
     }
 
-    exports.ox_target:addModel(models, options)
+    if #models > 0 then exports.ox_target:addModel(models, options) end
+    -- Stations set by spot: an interaction sphere where the equipment is.
+    for _, st in ipairs(spots) do
+        exports.ox_target:addSphereZone({
+            coords = vec3(st.coords.x, st.coords.y, st.coords.z),
+            radius = st.radius or 1.2,
+            debug = Config.Debug == true,
+            options = options,
+        })
+    end
 
     -- wasabi's own beds get exactly one option from us, the desk request:
     -- lying down there stays wasabi's, and the server reads the bed back from

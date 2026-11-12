@@ -23,6 +23,7 @@ shared_scripts {
 
 client_scripts {
     'client/main.lua',
+    'client/inventory_status.lua', -- DPS 2026-11-12: symptoms on the inventory status panel
 }
 
 server_scripts {
@@ -35,6 +36,7 @@ server_scripts {
 -- resource never takes NUI focus of its own.
 files {
     'ui/index.html',
+    'ui/dps-logo.svg',      -- house logo in the header (2026-10-10)
     'ui/img/female.webp',   -- body map figures (2026-10-01): DPS orange, shown as ghosts
     'ui/img/male.webp',
 }

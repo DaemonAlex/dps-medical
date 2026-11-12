@@ -1465,7 +1465,9 @@ lib.callback.register('dps-medical:getChartFor', function(src, targetSrc)
     if gender == 1 or gender == '1' or gender == 'female' then sex = 'female' end
 
     return {
-        patient = { name = name, citizenid = cid, sex = sex },
+        patient = { name = name, citizenid = cid, sex = sex,
+            -- DPS 2026-10-02: health insurance from dps-insurance (nil when it is not running)
+            insured = GetResourceState('dps-insurance') == 'started' and exports['dps-insurance']:IsHealthInsured(cid) or nil },
         body = body,
         bleeding = 0,
         conditions = conds,
