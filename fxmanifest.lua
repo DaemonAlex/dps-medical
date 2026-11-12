@@ -23,6 +23,7 @@ shared_scripts {
 
 client_scripts {
     'client/main.lua',
+    'client/inventory_status.lua', -- DPS 2026-11-12: symptoms on the inventory status panel
 }
 
 server_scripts {
