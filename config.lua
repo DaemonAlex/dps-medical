@@ -12,10 +12,10 @@ Config = {}
 
 -- Mirrors wasabi_ambulance's own ambulanceJobs list so the two never disagree
 -- about who is a medic. Keep them in step.
-Config.MedicalJobs = { 'sams', 'omc', 'rmc' }
+Config.MedicalJobs = { 'sams', 'lsmc' }
 
 -- Jobs that may also read a chart without being able to treat (front desk, etc).
-Config.RecordReadJobs = { 'sams', 'omc', 'rmc' }
+Config.RecordReadJobs = { 'sams', 'lsmc' }
 
 -- ===========================================================================
 -- Illness engine
@@ -232,9 +232,9 @@ Config.StationKinds = {
 -- wsb_ambulance_facilities on 2026-09-23 (model 1570477186 = lit1_hospital,
 -- the OMC map's custom bed), so the two systems agree bed for bed.
 Config.Stations = {
-    -- ---- Ocean Medical Center: wards (wasabi beds) --------------------------
+    -- ---- Los Santos Medical Center: wards (wasabi beds) --------------------------
     bed_ocean_medical_center_1 = {
-        facility = 'Ocean Medical Center',
+        facility = 'Los Santos Medical Center',
         kind = 'bed',
         prop = 'lit1_hospital',
         coords = vec4(-1865.75, -332.10, 48.76, 137.5),
@@ -243,7 +243,7 @@ Config.Stations = {
         transferSeconds = 20,
     },
     bed_ocean_medical_center_2 = {
-        facility = 'Ocean Medical Center',
+        facility = 'Los Santos Medical Center',
         kind = 'bed',
         prop = 'lit1_hospital',
         coords = vec4(-1868.59, -329.93, 48.76, 141.6),
@@ -252,7 +252,7 @@ Config.Stations = {
         transferSeconds = 20,
     },
     bed_ocean_medical_center_3 = {
-        facility = 'Ocean Medical Center',
+        facility = 'Los Santos Medical Center',
         kind = 'bed',
         prop = 'lit1_hospital',
         coords = vec4(-1865.70, -325.47, 48.76, 321.3),
@@ -261,7 +261,7 @@ Config.Stations = {
         transferSeconds = 20,
     },
     bed_ocean_medical_center_4 = {
-        facility = 'Ocean Medical Center',
+        facility = 'Los Santos Medical Center',
         kind = 'bed',
         prop = 'lit1_hospital',
         coords = vec4(-1872.32, -326.92, 48.76, 142.3),
@@ -270,7 +270,7 @@ Config.Stations = {
         transferSeconds = 20,
     },
     bed_ocean_medical_center_5 = {
-        facility = 'Ocean Medical Center',
+        facility = 'Los Santos Medical Center',
         kind = 'bed',
         prop = 'lit1_hospital',
         coords = vec4(-1868.81, -323.12, 48.76, 321.9),
@@ -279,7 +279,7 @@ Config.Stations = {
         transferSeconds = 20,
     },
     bed_ocean_medical_center_6 = {
-        facility = 'Ocean Medical Center',
+        facility = 'Los Santos Medical Center',
         kind = 'bed',
         prop = 'lit1_hospital',
         coords = vec4(-1875.22, -324.74, 48.76, 142.2),
@@ -288,7 +288,7 @@ Config.Stations = {
         transferSeconds = 20,
     },
     bed_ocean_medical_center_7 = {
-        facility = 'Ocean Medical Center',
+        facility = 'Los Santos Medical Center',
         kind = 'bed',
         prop = 'lit1_hospital',
         coords = vec4(-1871.96, -320.60, 48.76, 322.2),
@@ -297,7 +297,7 @@ Config.Stations = {
         transferSeconds = 20,
     },
     bed_ocean_medical_center_8 = {
-        facility = 'Ocean Medical Center',
+        facility = 'Los Santos Medical Center',
         kind = 'bed',
         prop = 'lit1_hospital',
         coords = vec4(-1878.53, -322.07, 48.76, 141.5),
@@ -306,7 +306,7 @@ Config.Stations = {
         transferSeconds = 20,
     },
     bed_ocean_medical_center_9 = {
-        facility = 'Ocean Medical Center',
+        facility = 'Los Santos Medical Center',
         kind = 'bed',
         prop = 'lit1_hospital',
         coords = vec4(-1875.24, -318.05, 48.76, 321.7),
@@ -315,7 +315,7 @@ Config.Stations = {
         transferSeconds = 20,
     },
 
-    -- ---- Ocean Medical Center: lab and imaging ------------------------------
+    -- ---- Los Santos Medical Center: lab and imaging ------------------------------
     -- Captured in game with /stationcapture; paste the blocks from
     -- station_captures.txt here. Until a kind exists its tests refuse.
     -- Set by spot (Damon, in game 2026-10-12): the equipment is part of the
@@ -323,22 +323,22 @@ Config.Stations = {
     -- spot he stood on. Heading: X-ray and CT face like wasabi bed 23 beside
     -- them (136); the lab and MRI use 0 until checked in game.
     omc_bloodlab_1 = {
-        facility = 'Ocean Medical Center', kind = 'bloodlab', spot = true,
+        facility = 'Los Santos Medical Center', kind = 'bloodlab', spot = true,
         coords = vec4(-1826.33, -352.23, 49.45, 0.0),
         slot   = vec4(-1826.33, -352.23, 49.45, 0.0),
     },
     omc_xray_1 = {
-        facility = 'Ocean Medical Center', kind = 'xray', spot = true,
+        facility = 'Los Santos Medical Center', kind = 'xray', spot = true,
         coords = vec4(-1875.43, -331.56, 53.75, 136.0),
         slot   = vec4(-1875.43, -331.56, 53.75, 136.0),
     },
     omc_ct_1 = {
-        facility = 'Ocean Medical Center', kind = 'ct', spot = true,
+        facility = 'Los Santos Medical Center', kind = 'ct', spot = true,
         coords = vec4(-1877.69, -328.52, 53.75, 136.0),
         slot   = vec4(-1877.69, -328.52, 53.75, 136.0),
     },
     omc_mri_1 = {
-        facility = 'Ocean Medical Center', kind = 'mri', spot = true,
+        facility = 'Los Santos Medical Center', kind = 'mri', spot = true,
         coords = vec4(-1856.52, -356.00, 41.25, 0.0),
         slot   = vec4(-1856.52, -356.00, 41.25, 0.0),
     },
