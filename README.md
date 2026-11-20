@@ -96,10 +96,18 @@ recorded against the patient's cover.
 `contract(citizenid, key)` inserts a row in `dps_medical_conditions` at stage
 `incubating`. A server timer (`Config.TickSeconds`, 60 s) advances every open
 row: incubation ends → `symptomatic`; severity climbs toward `severityMax`;
-untreated conditions resolve on their own after `durationMinutes`; recovery
+untreated conditions resolve on their own after `durationMinutes`, unless the
+condition is marked `needsDoctor` and has reached its worst; recovery
 grants immunity for `immunityMinutes` where the definition says so. Treatment
 is an inventory item named in the condition (`antiviral`, `antibiotics`,
-`antiemetic`); concussion has none — rest only.
+`antiemetic`). Concussion, internal bleeding and soft tissue injury have no
+medication: a medic orders **bed rest** (see below).
+
+The clock only runs while the player is in the city. Logging off stamps
+`paused_at` on their open conditions; logging in moves the start times forward
+by the time away. Nobody comes back from a week off with a critical cold.
+
+The patient gets a notice when a symptom starts and each time it gets worse.
 
 The patient sees **symptoms**, never the condition name, until a medic records
 a diagnosis. That is what keeps a doctor a doctor.
@@ -195,6 +203,20 @@ the patient on the slot with the station's animation and writes a `transfer`
 visit row. Dead patients are refused (wasabi's stretcher moves the downed);
 wasabi's own beds are refused (wasabi owns lying down there).
 
+The patient is awake, so the patient is asked: a dialog with **Agree** and
+**Refuse**. Anything but Agree cancels the move. An imaging table holds the
+patient for the scan, but only for `Config.StationHoldSeconds` (180 s); after
+that they can get up without staff.
+
+### Bed rest (a medic's order)
+
+For the conditions with no medication. With the patient on a bed, open
+diagnostics on them and pick **Order bed rest** (or `/orderrest <id>`). Each
+diagnosed rest-only condition clears after
+`severity × Config.RestOrder.minutesPerSeverity` minutes spent on the bed, on
+the same clock the desk uses: leaving the bed pauses it. No charge is taken.
+Visits: `admission` and `discharge` under the medic's name.
+
 ### The desk (no staff on duty)
 
 When nobody from `Config.MedicalJobs` is on duty, a symptomatic patient lying
@@ -221,8 +243,9 @@ Visits: `admission` (with cost and minutes) and `discharge`, staff `Desk`.
 | `soft_tissue` | Soft Tissue Injury | localised pain, fatigue | 15 min | no | rest (placeholder — TUNE) |
 
 Severity climbs one step every `SeverityStepMinutes` while symptomatic and
-untreated, up to `severityMax`; **at max a condition no longer clears on its
-own** — someone has to treat it.
+untreated, up to `severityMax`. The three marked `needsDoctor` (respiratory
+virus, wound infection, internal bleeding) **do not clear on their own once
+they are at their worst**; the other four pass when their time is up.
 
 ## In game
 
@@ -233,14 +256,17 @@ own** — someone has to treat it.
   and any diagnosis a medic has recorded. Until the phone app lands this is the
   patient view.
 
-**Medical staff** (`Config.MedicalJobs`)
+**Medical staff** (`Config.MedicalJobs`, and **on duty**)
 
 - Inspect a patient in wasabi's inspection UI; the chart is pushed into it.
 - `/diagnostics` (bindable: *Medical: diagnostics on inspected patient*) —
   menu of tests for the patient you are inspecting. Hospital-only tests are
   greyed out unless you are at a facility.
-- `/runtest <id> <test>` — the same thing by command.
-- `/diagnose <id> <condition>` — record a diagnosis. Refused until the
+- `/runtest <id> <test>` — the same thing by command. Field tests need you
+  within reach of the patient.
+- `/orderrest <id>` — order bed rest for a patient lying on a bed.
+- `/diagnose <id> <condition>` — record a diagnosis, standing with the
+  patient. Refused until the
   confirming test has been run, for conditions that require one. From then on
   the patient sees the condition's name.
 - `/administer <id> <item>` — give a medication from your own inventory to a
@@ -334,17 +360,43 @@ readable by anything else on the server.
 it inside its app frame, and wasabi's inspection UI receives it by
 `SendNUIMessage`, so this resource never takes NUI focus of its own.
 
+## Recent changes
+
+**0.2.0 (2026-11-20)**
+
+- Illness now clears. Before, every condition reached its worst before its
+  time was up and was then kept for ever.
+- Bed rest: a medic can cure concussion, internal bleeding and soft tissue
+  injury. Before, nothing could while a medic was on duty.
+- The illness clock stops while the player is offline.
+- The patient is told when a symptom starts or gets worse.
+- Staff actions need the medic on duty and next to the patient (field tests,
+  diagnosis, rest, medication). A diagnosis can no longer find an illness that
+  is still incubating.
+- A conscious patient must agree to a transfer, and a scanner table lets go
+  after 3 minutes.
+- Illness does not spread between instanced interiors.
+- "Is the patient down" reads wasabi's own state; wasabi beds are also matched
+  by where the patient is lying.
+- The patient's client is no longer sent the name of an undiagnosed illness.
+- New column `dps_medical_conditions.paused_at`, added by the resource at start.
+
 ## Known gaps
 
 - The seven item images are missing from `ox_inventory/web/images/`; the items
   work but render blank.
-- No stations are captured yet on DPS (the hospitals are still being built in
-  wasabi), so the station path has not been exercised in game.
+- DPS has 13 stations at Los Santos Medical Center (9 wasabi beds, lab, X-ray,
+  CT, MRI). The lab and MRI headings are still 0 until checked in game.
+- The test items (thermometer, pulse oximeter, pen light, blood test kit) are
+  not required or used up by a test yet: no shop on DPS sells them.
+- Illness has no effect on the body beyond the notices (no cough, no blur).
 - The wound-age clock for slow onsets (infection, internal bleeding) restarts
   on relog: wasabi's limb data carries no timestamps.
 - Where the patient self-view lives long-term (phone app, hotkey, both) is an
   open decision; `/health` is the interim.
-- No test suite.
+- Tests cover the rules only (`lua5.4 tests/run.lua`, 63 checks): recovery,
+  severity, rest, zones, and that every condition has a way out. The server
+  and client code have no automated tests.
 
 See `CHANGES.md` for the full review brief and the questions still open.
 

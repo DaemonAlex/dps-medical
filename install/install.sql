@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS `dps_medical_conditions` (
   `confirmed_at` datetime DEFAULT NULL,
   `treated_at` datetime DEFAULT NULL,
   `resolved_at` datetime DEFAULT NULL,
+  `paused_at` datetime DEFAULT NULL,
   `data` longtext DEFAULT NULL,
   `updated_at` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),

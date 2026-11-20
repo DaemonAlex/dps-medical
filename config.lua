@@ -44,7 +44,7 @@ Config.MaxNewInfectionsPerPass = 2
 
 -- Severity climbs one step every this many minutes while symptomatic and
 -- untreated, up to the condition's severityMax. A condition may override with
--- its own severityStepMinutes. At severityMax it no longer clears on its own.
+-- its own severityStepMinutes. See needsDoctor under Conditions.
 Config.SeverityStepMinutes = 30
 
 -- How the patient hears a symptom at each severity. Never the illness name.
@@ -69,6 +69,20 @@ Config.Npc = {
     costPerSeverity = 250,
     workup = 'Desk workup: %s. Admitted for observation.',
 }
+
+-- Bed rest ordered by a medic: the cure for conditions with no medication
+-- (treatment = nil). Target the patient, open diagnostics, "Order bed rest"
+-- (or /orderrest <id>). The patient must be on a bed; each condition clears
+-- after severity * minutesPerSeverity spent there. No charge: billing is the
+-- medic's own business.
+Config.RestOrder = {
+    minutesPerSeverity = 5,
+}
+
+-- An imaging table (canLeave = false) holds the patient for the scan. After
+-- this many seconds they can get up without staff, so nobody can be parked on
+-- a table and left there.
+Config.StationHoldSeconds = 180
 
 -- Breadcrumbs. Staff below this job grade get a hint on every refusal telling
 -- them what to do instead; from this grade up the system assumes they know.
@@ -356,8 +370,13 @@ Config.Stations = {
 -- immunityMinutes   : how long they are immune after recovery; false = none.
 -- onsetFrom         : hooks that let TRAUMA cause illness, tying the two halves
 --                     together - an untreated gunshot can go septic.
--- severityMax       : how far severity climbs. At max it will NOT clear on its
---                     own any more - someone has to treat it.
+-- severityMax       : how far severity climbs.
+-- needsDoctor       : true = once it has reached severityMax it will NOT clear
+--                     on its own; someone has to treat it. Without this a
+--                     condition clears when durationMinutes is up, however bad
+--                     it got. (Before 0.2.0 every condition behaved as
+--                     needsDoctor, and with these numbers all of them reached
+--                     max before their time was up, so nothing ever cleared.)
 -- severityStepMinutes : optional; overrides Config.SeverityStepMinutes.
 -- requiresConfirmation : true = a medic can GUESS it, but /diagnose refuses
 --                     until a test that `confirms` it has been run on this
@@ -389,6 +408,7 @@ Config.Conditions = {
         treatment = 'antiviral',
         immunityMinutes = 1440,
         severityMax = 4,
+        needsDoctor = true,            -- serious: will not pass on its own
         requiresConfirmation = true,   -- blood panel
     },
 
@@ -414,6 +434,7 @@ Config.Conditions = {
         treatment = 'antibiotics',
         immunityMinutes = false,
         severityMax = 4,
+        needsDoctor = true,            -- serious: will not pass on its own
         requiresConfirmation = true,   -- blood panel
         onsetFrom = {
             -- An open wound of these types, left on the body this long, may go septic.
@@ -442,8 +463,9 @@ Config.Conditions = {
     },
 
     -- The two conditions the CT and MRI stations exist for. Placeholder
-    -- numbers - TUNE. Neither has a pill: they clear with rest while severity
-    -- is below max, and at max they wait for a doctor.
+    -- numbers - TUNE. Neither has a pill: a medic orders bed rest
+    -- (Config.RestOrder). A soft tissue injury also passes with time; an
+    -- internal bleed does not.
     internal_bleed = {
         label = 'Internal Bleeding',
         symptoms = { 'fatigue', 'nausea', 'breathless' },
@@ -453,6 +475,7 @@ Config.Conditions = {
         treatment = nil,
         immunityMinutes = false,
         severityMax = 4,
+        needsDoctor = true,            -- serious: will not pass on its own
         severityStepMinutes = 15,
         requiresConfirmation = true,   -- CT scan
         onsetFrom = {

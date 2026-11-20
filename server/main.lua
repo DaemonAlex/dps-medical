@@ -18,6 +18,8 @@ local stationOccupant = {}  -- stationId -> { cid, src, since, released }
 local patientStation  = {}  -- citizenid -> stationId
 local vacateStation         -- defined with the station module below; needed by playerUnloaded above it
 local hintFor               -- likewise; used by the treatment code above the station module
+local pushState             -- defined above the tick; sends a player their own state
+local clearAidRecord        -- defined with the mobility aid module
 
 -- wasabi indexes limbs 1..6 in this documented order.
 local LIMB_LABELS = { 'Head', 'Torso', 'Left arm', 'Right arm', 'Left leg', 'Right leg' }
@@ -42,6 +44,11 @@ end
 local function debug(fmt, ...)
     if Config.Debug then print(('[dps-medical] ' .. fmt):format(...)) end
 end
+
+-- 0.2.0 adds one column. Added here so an update needs no manual SQL.
+MySQL.ready(function()
+    MySQL.query.await('ALTER TABLE dps_medical_conditions ADD COLUMN IF NOT EXISTS paused_at DATETIME NULL DEFAULT NULL')
+end)
 
 -- ===========================================================================
 -- The chart
@@ -74,12 +81,12 @@ exports('recordVisit', recordVisit)
 ---@param key string
 ---@return boolean
 local function isImmune(citizenid, key)
-    local row = MySQL.single.await(
-        'SELECT expires_at FROM dps_medical_immunity WHERE citizenid = ? AND condition_key = ?',
-        { citizenid, key })
-    if not row then return false end
-    if row.expires_at == nil then return true end -- permanent
-    return MySQL.scalar.await('SELECT NOW() < ?', { row.expires_at }) == 1
+    -- expires_at NULL = permanent
+    return MySQL.scalar.await([[
+        SELECT 1 FROM dps_medical_immunity
+        WHERE citizenid = ? AND condition_key = ? AND (expires_at IS NULL OR expires_at > NOW())
+        LIMIT 1
+    ]], { citizenid, key }) ~= nil
 end
 
 ---@param citizenid string
@@ -195,30 +202,8 @@ local function loadConditions(citizenid)
     debug('loaded %d conditions for %s', #rows, citizenid)
 end
 
----@param list table?
----@param value any
----@return boolean
-local function listHas(list, value)
-    for i = 1, #(list or {}) do
-        if list[i] == value then return true end
-    end
-    return false
-end
-
----Does an onsetFrom rule apply to this limb? No `zones` means any limb.
----wasabi indexes limbs 1..6 in its documented order: 1 head, 2 body.
----@param onset table
----@param limbIndex number
----@return boolean
-local function zoneMatches(onset, limbIndex)
-    if not onset.zones then return true end
-    for _, z in ipairs(onset.zones) do
-        if (z == 'head' and limbIndex == 1) or (z == 'body' and limbIndex == 2) then
-            return true
-        end
-    end
-    return false
-end
+-- Plain decisions live in shared/rules.lua so tests can reach them.
+local listHas, zoneMatches = Rules.listHas, Rules.zoneMatches
 
 ---Pull stage, severity and diagnosis back out of the DB for one player.
 ---
@@ -255,6 +240,56 @@ local function syncConditions(citizenid)
     end
 end
 
+---What the patient is allowed to know: symptoms and anything a medic has
+---diagnosed. Never the name of an undiagnosed illness.
+---@param cid string
+---@return table { symptoms = {}, diagnosed = {} }
+local function patientView(cid)
+    local out = { symptoms = {}, diagnosed = {} }
+    local seen = {} -- symptom key -> index in out.symptoms
+    for _, row in pairs(conditions[cid] or {}) do
+        if row.stage == 'symptomatic' then
+            local def = Config.Conditions[row.condition_key]
+            if def then
+                -- Severity rides along so the wording can scale ("a cough" vs
+                -- "you can barely breathe") without ever naming the illness.
+                local sev = tonumber(row.severity) or 1
+                for _, sym in ipairs(def.symptoms or {}) do
+                    local i = seen[sym]
+                    if not i then
+                        i = #out.symptoms + 1
+                        seen[sym] = i
+                        out.symptoms[i] = {
+                            key = sym,
+                            label = Config.Symptoms[sym] and Config.Symptoms[sym].label or sym,
+                            patient = Config.Symptoms[sym] and Config.Symptoms[sym].patient or '',
+                            severity = sev,
+                        }
+                    elseif sev > out.symptoms[i].severity then
+                        out.symptoms[i].severity = sev
+                    end
+                end
+                if row.diagnosed_at then
+                    out.diagnosed[#out.diagnosed + 1] = { key = row.condition_key, label = def.label, severity = sev }
+                end
+            end
+        end
+    end
+    return out
+end
+
+---Send a player their own state. The rows carry stage and severity only: the
+---condition key stays on the server, so a client cannot read its own diagnosis.
+---@param src number
+---@param cid string
+pushState = function(src, cid)
+    local rows = {}
+    for id, row in pairs(conditions[cid] or {}) do
+        rows[id] = { stage = row.stage, severity = row.severity }
+    end
+    TriggerClientEvent('dps-medical:client:conditions', src, rows, patientView(cid))
+end
+
 -- ===========================================================================
 -- Progression - the slow server tick
 -- ===========================================================================
@@ -267,7 +302,7 @@ CreateThread(function()
         MySQL.update([[
             UPDATE dps_medical_conditions
             SET stage = 'symptomatic'
-            WHERE stage = 'incubating' AND resolved_at IS NULL
+            WHERE stage = 'incubating' AND resolved_at IS NULL AND paused_at IS NULL
               AND incubating_until IS NOT NULL AND incubating_until <= NOW()
         ]])
 
@@ -278,11 +313,12 @@ CreateThread(function()
         for key, def in pairs(Config.Conditions) do
             local max = def.severityMax or 1
             if max > 1 then
-                local step = math.max(1, def.severityStepMinutes or Config.SeverityStepMinutes or 30)
+                local step = Rules.stepMinutes(def, Config.SeverityStepMinutes)
                 MySQL.update([[
                     UPDATE dps_medical_conditions
                     SET severity = LEAST(?, 1 + FLOOR(TIMESTAMPDIFF(MINUTE, COALESCE(incubating_until, contracted_at), NOW()) / ?))
                     WHERE condition_key = ? AND resolved_at IS NULL AND stage = 'symptomatic'
+                      AND paused_at IS NULL
                 ]], { max, step, key })
             end
         end
@@ -313,19 +349,25 @@ CreateThread(function()
             end
         end
 
-        -- Natural recovery once a condition has run its course untreated -
-        -- but NOT once severity has reached the condition's max. At max it
-        -- stays until someone treats it: that is the "you need a doctor" hook.
+        -- Natural recovery once a condition has run its course untreated.
+        -- Rules.recovers decides: a needsDoctor condition that has reached its
+        -- worst stays until someone treats it; everything else clears.
+        -- (Before 0.2.0 every condition hit max before its time was up and the
+        -- old "not at max" rule then kept it for ever.)
         for key, def in pairs(Config.Conditions) do
             if def.durationMinutes then
-                local done = MySQL.query.await([[
-                    SELECT id, citizenid FROM dps_medical_conditions
+                local due = MySQL.query.await([[
+                    SELECT id, citizenid, severity,
+                           TIMESTAMPDIFF(MINUTE, contracted_at, NOW()) AS age
+                    FROM dps_medical_conditions
                     WHERE condition_key = ? AND resolved_at IS NULL AND stage = 'symptomatic'
-                      AND severity < ?
+                      AND paused_at IS NULL
                       AND contracted_at <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-                ]], { key, def.severityMax or 99, (def.incubationMinutes or 0) + def.durationMinutes }) or {}
-                for i = 1, #done do
-                    resolve(done[i].citizenid, done[i].id, 'recovered')
+                ]], { key, (def.incubationMinutes or 0) + def.durationMinutes }) or {}
+                for i = 1, #due do
+                    if Rules.recovers(def, tonumber(due[i].severity) or 1, tonumber(due[i].age) or 0) then
+                        resolve(due[i].citizenid, due[i].id, 'recovered')
+                    end
                 end
             end
         end
@@ -339,8 +381,7 @@ CreateThread(function()
             local cid = cidOf(tonumber(src))
             if cid and conditions[cid] and next(conditions[cid]) then
                 syncConditions(cid)
-                TriggerClientEvent('dps-medical:client:conditions', tonumber(src),
-                    lib.table.deepclone(conditions[cid]))
+                pushState(tonumber(src), cid)
             end
         end
     end
@@ -362,6 +403,7 @@ CreateThread(function()
                 if carrierCid and contagious[carrierCid] then
                     local cPed = GetPlayerPed(carrierSrc)
                     local cCoords = GetEntityCoords(cPed)
+                    local cBucket = GetPlayerRoutingBucket(carrierSrc)
 
                     -- Two guards against the snowball: a carrier starts at most
                     -- MaxNewInfectionsPerPass cases per pass, and while still
@@ -371,7 +413,8 @@ CreateThread(function()
                     for _, nearSrc in ipairs(players) do
                         if started >= cap then break end
                         nearSrc = tonumber(nearSrc)
-                        if nearSrc ~= carrierSrc then
+                        -- Same world only: two instanced interiors can share coords.
+                        if nearSrc ~= carrierSrc and GetPlayerRoutingBucket(nearSrc) == cBucket then
                             local nCoords = GetEntityCoords(GetPlayerPed(nearSrc))
                             if #(cCoords - nCoords) <= Config.ContagionDistance then
                                 local nearCid = cidOf(nearSrc)
@@ -457,8 +500,7 @@ local function applyTreatment(patientCid, patientSrc, itemName, itemLabel, staff
         staff_name = staffName, staff_job = staffJob,
         notes = staffSrc and ('Given %s'):format(itemLabel) or ('Took %s'):format(itemLabel),
     })
-    TriggerClientEvent('dps-medical:client:conditions', patientSrc,
-        lib.table.deepclone(conditions[patientCid] or {}))
+    pushState(patientSrc, patientCid)
     return #ids
 end
 
@@ -497,6 +539,11 @@ end)
 
 local legRecord = {}   -- citizenid -> { [limbIndex] = { [injuryType] = worst count } }
 local lastAidAt = {}   -- citizenid -> os.time() of the last hand-off (repeat guard)
+
+clearAidRecord = function(cid)
+    legRecord[cid] = nil
+    lastAidAt[cid] = nil
+end
 
 local function rememberLegs(cid, limbs)
     local cfg = Config.MobilityAid
@@ -683,17 +730,44 @@ end)
 -- Player lifecycle
 -- ===========================================================================
 
+-- The illness clock runs only while the player is in the city. Leaving stamps
+-- paused_at on their open conditions; coming back moves the start times
+-- forward by the time away. (Before 0.2.0 a cold kept getting worse offline.)
+local function pauseClock(citizenid)
+    MySQL.update([[
+        UPDATE dps_medical_conditions SET paused_at = NOW()
+        WHERE citizenid = ? AND resolved_at IS NULL AND paused_at IS NULL
+    ]], { citizenid })
+end
+
+local function resumeClock(citizenid)
+    MySQL.update.await([[
+        UPDATE dps_medical_conditions
+        SET contracted_at = TIMESTAMPADD(SECOND, TIMESTAMPDIFF(SECOND, paused_at, NOW()), contracted_at),
+            incubating_until = TIMESTAMPADD(SECOND, TIMESTAMPDIFF(SECOND, paused_at, NOW()), incubating_until),
+            paused_at = NULL
+        WHERE citizenid = ? AND resolved_at IS NULL AND paused_at IS NOT NULL
+    ]], { citizenid })
+end
+
 AddEventHandler('qbx_core:server:playerLoaded', function(player)
     local cid = player and player.PlayerData and player.PlayerData.citizenid
-    if cid then loadConditions(cid) end
+    if not cid then return end
+    resumeClock(cid)
+    loadConditions(cid)
+    local src = player.PlayerData.source
+    if src and next(conditions[cid] or {}) then pushState(src, cid) end
 end)
 
 AddEventHandler('qbx_core:server:playerUnloaded', function(source, citizenid)
     if citizenid then
         if vacateStation then vacateStation(citizenid, 'disconnected') end
+        pauseClock(citizenid)
         conditions[citizenid] = nil
         contagious[citizenid] = nil
         woundSince[citizenid] = nil
+        lastLimbs[citizenid] = nil
+        if clearAidRecord then clearAidRecord(citizenid) end
     end
 end)
 
@@ -702,15 +776,25 @@ end)
 -- had an empty cache until they relogged. Hydrate them now.
 CreateThread(function()
     Wait(2000) -- let oxmysql settle
-    local n = 0
+    local n, online = 0, {}
     for _, src in ipairs(GetPlayers()) do
         local cid = cidOf(tonumber(src))
         if cid then
+            online[#online + 1] = cid
+            resumeClock(cid)
             loadConditions(cid)
             n = n + 1
         end
     end
     if n > 0 then debug('hydrated conditions for %d online players', n) end
+
+    -- Anyone not in the city right now gets their clock stopped. This covers a
+    -- server stop or crash, where playerUnloaded never ran.
+    if #online == 0 then
+        MySQL.update('UPDATE dps_medical_conditions SET paused_at = NOW() WHERE resolved_at IS NULL AND paused_at IS NULL')
+    else
+        MySQL.update('UPDATE dps_medical_conditions SET paused_at = NOW() WHERE resolved_at IS NULL AND paused_at IS NULL AND citizenid NOT IN (?)', { online })
+    end
 end)
 
 -- ===========================================================================
@@ -800,11 +884,38 @@ end)
 ---@param src number
 ---@return boolean, string? job
 local function isMedic(src)
-    local _, job = whoIs(src)
+    local player = exports.qbx_core:GetPlayer(src)
+    local job = player and player.PlayerData and player.PlayerData.job
+    if not job then return false, nil end
     for _, j in ipairs(Config.MedicalJobs) do
-        if j == job then return true, job end
+        -- The job alone is not enough: off duty, a medic is a civilian.
+        if j == job.name then return job.onduty == true, job.name end
     end
-    return false, job
+    return false, job.name
+end
+
+---Is this player down? wasabi keeps a server-owned state bag for it (the same
+---one wasabi_police reads). The old calls to wasabi exports that may not exist
+---always answered "no".
+---@param src number
+---@return boolean
+local function isDown(src)
+    local st = Player(src) and Player(src).state
+    local death = st and st['wasabi:deathState']
+    if death == 1 or death == 2 then return true end
+    local ped = GetPlayerPed(src)
+    return ped ~= 0 and GetEntityHealth(ped) <= 0
+end
+
+---@param a number server id
+---@param b number server id
+---@param metres number
+---@return boolean
+local function within(a, b, metres)
+    local pa, pb = GetPlayerPed(a), GetPlayerPed(b)
+    if pa == 0 or pb == 0 then return false end
+    if GetPlayerRoutingBucket(a) ~= GetPlayerRoutingBucket(b) then return false end
+    return #(GetEntityCoords(pa) - GetEntityCoords(pb)) <= metres
 end
 
 -- ===========================================================================
@@ -901,10 +1012,18 @@ local function stationOfPatient(cid, src)
     pcall(function() bed = exports.wasabi_ambulance_v2:getPlayerBed(src) end)
     if bed == nil then pcall(function() bed = exports.wasabi_ambulance:getPlayerBed(src) end) end
     local c = type(bed) == 'table' and (bed.coords or bed) or nil
+    if not (c and c.x and c.y and c.z) then
+        -- wasabi gave no answer (the export may not exist in this version):
+        -- go by where the patient actually is. Lying on a wasabi bed puts
+        -- them on its slot.
+        local ped = GetPlayerPed(src)
+        if ped ~= 0 then c = GetEntityCoords(ped) end
+    end
     if c and c.x and c.y and c.z then
         local p = vec3(c.x + 0.0, c.y + 0.0, c.z + 0.0)
         for id, st in pairs(Config.Stations) do
-            if st.wasabiBed and #(p - vec3(st.coords.x, st.coords.y, st.coords.z)) <= 1.5 then
+            if st.wasabiBed and (#(p - vec3(st.coords.x, st.coords.y, st.coords.z)) <= 1.5
+                or #(p - vec3(st.slot.x, st.slot.y, st.slot.z)) <= 1.5) then
                 return id, st
             end
         end
@@ -922,9 +1041,7 @@ lib.callback.register('dps-medical:occupy', function(src, sid)
     if stationOccupant[sid] then return { ok = false, line = 'Someone is already on it.' } end
     if stationOfPatient(cid, src) then return { ok = false, line = 'You are already on a station.' } end
     if not nearStation(src, st) then return { ok = false, line = 'Get to the station first.' } end
-    local dead = false
-    pcall(function() dead = exports.wasabi_ambulance_v2:isPlayerDead(src) end)
-    if dead then return { ok = false, line = 'That needs a stretcher, not a bed.' } end
+    if isDown(src) then return { ok = false, line = 'That needs a stretcher, not a bed.' } end
 
     stationOccupant[sid] = { cid = cid, src = src, since = os.time() }
     patientStation[cid] = sid
@@ -945,7 +1062,11 @@ lib.callback.register('dps-medical:leave', function(src)
     if not sid then return { ok = true } end
     local st = Config.Stations[sid]
     local kind = st and Config.StationKinds[st.kind] or {}
-    if kind.canLeave == false and not (stationOccupant[sid] and stationOccupant[sid].released) then
+    local occ = stationOccupant[sid]
+    -- A table holds the patient for the scan, but not for ever: after
+    -- StationHoldSeconds they can get up by themselves.
+    local held = occ and (os.time() - occ.since) < (Config.StationHoldSeconds or 180)
+    if kind.canLeave == false and held and not occ.released then
         return { ok = false, line = 'Hold still - wait for the scan, or for staff to let you off.' }
     end
     vacateStation(cid, 'got up')
@@ -954,7 +1075,7 @@ end)
 
 -- A medic lets a patient off any station.
 lib.callback.register('dps-medical:release', function(src, targetSrc)
-    if not isMedic(src) then return { ok = false, line = 'You are not medical staff.' } end
+    if not isMedic(src) then return { ok = false, line = 'You are not on duty as medical staff.' } end
     local cid = cidOf(targetSrc)
     if not cid or not patientStation[cid] then return { ok = false, line = 'They are not on a station.' } end
     vacateStation(cid, 'released by staff')
@@ -1027,7 +1148,7 @@ lib.callback.register('dps-medical:staffOnDuty', function() return staffOnDuty e
 ---@param targetSrc number patient
 ---@return table? station, string? line, string? hintKey
 local function canTransfer(src, sid, targetSrc)
-    if not isMedic(src) then return nil, 'You are not medical staff.' end
+    if not isMedic(src) then return nil, 'You are not on duty as medical staff.' end
     local st = Config.Stations[sid]
     if not st then return nil, 'No such station.' end
     if st.wasabiBed then return nil, 'That bed is run by the hospital desk - use its own menu.' end
@@ -1042,9 +1163,7 @@ local function canTransfer(src, sid, targetSrc)
     if #(GetEntityCoords(medPed) - GetEntityCoords(patPed)) > (Config.TransferDistance or 3.0) + 1.0 then
         return nil, 'Get next to the patient.', 'transfer'
     end
-    local dead = false
-    pcall(function() dead = exports.wasabi_ambulance_v2:isPlayerDead(targetSrc) end)
-    if dead then return nil, 'That needs a stretcher, not a transfer.' end
+    if isDown(targetSrc) then return nil, 'That needs a stretcher, not a transfer.' end
     return st
 end
 
@@ -1061,6 +1180,17 @@ lib.callback.register('dps-medical:transferCommit', function(src, sid, targetSrc
     if not st then return { ok = false, line = line, hint = hint and hintFor(src, hint) or nil } end
     targetSrc = tonumber(targetSrc)
     local cid = cidOf(targetSrc)
+
+    -- The patient is awake, so the patient says yes. No answer is a no.
+    local kindName = kindLabel(st.kind)
+    local asked, agreed = pcall(lib.callback.await, 'dps-medical:consent', targetSrc, kindName, whoIs(src))
+    if not asked or agreed ~= true then
+        return { ok = false, line = 'The patient did not agree to be moved.' }
+    end
+    -- They had time to think: the bed may have filled, or someone walked off.
+    st, line, hint = canTransfer(src, sid, targetSrc)
+    if not st then return { ok = false, line = line, hint = hint and hintFor(src, hint) or nil } end
+
     if patientStation[cid] then vacateStation(cid, 'transferred') end
 
     stationOccupant[sid] = { cid = cid, src = targetSrc, since = os.time() }
@@ -1116,7 +1246,7 @@ lib.callback.register('dps-medical:npcRequest', function(src)
         local def = Config.Conditions[row.condition_key]
         if def and row.stage == 'symptomatic' then
             local sev = math.max(1, tonumber(row.severity) or 1)
-            local secs = sev * (Config.Npc.minutesPerSeverity or 10) * 60
+            local secs = Rules.restSeconds(sev, Config.Npc.minutesPerSeverity)
             left[id] = secs
             totalSev = totalSev + sev
             if secs > longest then longest = secs end
@@ -1176,9 +1306,18 @@ function tickAdmissions()
         end
         if remaining == 0 then
             admissions[cid] = nil
-            recordVisit(cid, { event_type = 'discharge', staff_name = 'Desk', staff_job = 'desk', notes = 'Discharged by the desk' })
+            local by = adm.by -- nil = the desk; else the medic who ordered rest
+            recordVisit(cid, {
+                event_type = 'discharge', staff_citizenid = by and by.cid or nil,
+                staff_name = by and by.name or 'Desk', staff_job = by and by.job or 'desk',
+                notes = by and 'Bed rest complete' or 'Discharged by the desk',
+            })
             if src then
-                TriggerClientEvent('ox_lib:notify', src, { description = 'The desk discharges you. You can get up.', type = 'success', duration = 8000 })
+                pushState(src, cid)
+                TriggerClientEvent('ox_lib:notify', src, {
+                    description = by and 'Your bed rest is done. You can get up.' or 'The desk discharges you. You can get up.',
+                    type = 'success', duration = 8000,
+                })
             end
         elseif src and not onBed then
             TriggerClientEvent('ox_lib:notify', src, { description = 'Your treatment is paused until you are back on the bed.', type = 'inform' })
@@ -1254,7 +1393,7 @@ end)
 ---@return table result { ok = boolean, line = string, abnormal = boolean }
 local function runTest(staffSrc, patientSrc, testKey)
     local ok, job = isMedic(staffSrc)
-    if not ok then return { ok = false, line = 'You are not medical staff.' } end
+    if not ok then return { ok = false, line = 'You are not on duty as medical staff.' } end
 
     local test = Config.Tests[testKey]
     if not test then return { ok = false, line = 'No such test.' } end
@@ -1265,7 +1404,13 @@ local function runTest(staffSrc, patientSrc, testKey)
     -- Hospital tests run on equipment, not inside a radius: the PATIENT must be
     -- on a station of the test's kind, and the medic beside it.
     local station
-    if test.where ~= 'field' then
+    if test.where == 'field' then
+        -- A field test is hands-on. (Before 0.2.0 it worked on any player id
+        -- from anywhere on the map.)
+        if not within(staffSrc, patientSrc, (Config.AdministerDistance or 3.0) + 1.0) then
+            return { ok = false, line = 'Get closer to the patient.' }
+        end
+    else
         local _
         _, station = stationOfPatient(cid, patientSrc)
         if not station or station.kind ~= test.where then
@@ -1379,37 +1524,7 @@ lib.callback.register('dps-medical:getMyState', function(src)
     local cid = cidOf(src)
     if not cid then return {} end
 
-    local out = { symptoms = {}, diagnosed = {} }
-    local seen = {} -- symptom key -> index in out.symptoms
-    for _, row in pairs(conditions[cid] or {}) do
-        if row.stage == 'symptomatic' then
-            local def = Config.Conditions[row.condition_key]
-            if def then
-                -- Severity rides along so the wording can scale ("a cough" vs
-                -- "you can barely breathe") without ever naming the illness.
-                local sev = tonumber(row.severity) or 1
-                for _, s in ipairs(def.symptoms or {}) do
-                    local i = seen[s]
-                    if not i then
-                        i = #out.symptoms + 1
-                        seen[s] = i
-                        out.symptoms[i] = {
-                            key = s,
-                            label = Config.Symptoms[s] and Config.Symptoms[s].label or s,
-                            patient = Config.Symptoms[s] and Config.Symptoms[s].patient or '',
-                            severity = sev,
-                        }
-                    elseif sev > out.symptoms[i].severity then
-                        out.symptoms[i].severity = sev
-                    end
-                end
-                if row.diagnosed_at then
-                    out.diagnosed[#out.diagnosed + 1] = { key = row.condition_key, label = def.label, severity = sev }
-                end
-            end
-        end
-    end
-    return out
+    return patientView(cid)
 end)
 
 -- Everything the tablet needs about one patient, addressed by their server id.
@@ -1510,20 +1625,24 @@ lib.addCommand('diagnose', {
         { name = 'condition', type = 'string', help = 'Condition key' },
     },
 }, function(source, args)
-    local _, job = whoIs(source)
-    local allowed = false
-    for _, j in ipairs(Config.MedicalJobs) do if j == job then allowed = true end end
+    local allowed, job = isMedic(source)
     if not allowed then return end
 
     local cid = cidOf(args.id)
     local def = Config.Conditions[args.condition]
     if not cid or not def then return end
+    if not within(source, args.id, (Config.AdministerDistance or 3.0) + 1.0) then
+        TriggerClientEvent('ox_lib:notify', source, { description = 'Get closer to the patient.', type = 'error' })
+        return
+    end
 
     -- You can suspect anything. The chart only takes a diagnosis that a test
     -- has confirmed, for conditions that say so.
     local open, confirmed = false, false
     for _, row in pairs(conditions[cid] or {}) do
-        if row.condition_key == args.condition then
+        -- Only an illness that is showing can be diagnosed. Guessing must not
+        -- reveal one that is still incubating.
+        if row.condition_key == args.condition and row.stage == 'symptomatic' then
             open = true
             if row.confirmed_at then confirmed = true end
         end
@@ -1571,12 +1690,11 @@ end)
 ---@param itemName string
 ---@return table { ok = boolean, line = string }
 local function administer(src, targetSrc, itemName)
-    if not isMedic(src) then return { ok = false, line = 'You are not medical staff.' } end
+    if not isMedic(src) then return { ok = false, line = 'You are not on duty as medical staff.' } end
     local cid = cidOf(targetSrc)
     if not cid then return { ok = false, line = 'No such patient.' } end
 
-    local a, b = GetPlayerPed(src), GetPlayerPed(targetSrc)
-    if a == 0 or b == 0 or #(GetEntityCoords(a) - GetEntityCoords(b)) > (Config.AdministerDistance or 3.0) then
+    if not within(src, targetSrc, Config.AdministerDistance or 3.0) then
         return { ok = false, line = 'Get closer to the patient.' }
     end
 
@@ -1601,6 +1719,80 @@ local function administer(src, targetSrc, itemName)
     })
     return { ok = true, line = ('Gave %s.'):format(def.label) }
 end
+
+---A medic orders bed rest: the cure for the conditions no medication treats
+---(concussion, internal bleeding, soft tissue). The patient lies on a bed and
+---each condition clears after severity * RestOrder.minutesPerSeverity there,
+---on the same clock the desk uses. Before 0.2.0 these three could not be cured
+---at all while a medic was on duty.
+---@param src number medic
+---@param targetSrc number patient
+---@return table { ok = boolean, line = string }
+local function orderRest(src, targetSrc)
+    local ok, job = isMedic(src)
+    if not ok then return { ok = false, line = 'You are not on duty as medical staff.' } end
+    targetSrc = tonumber(targetSrc)
+    local cid = targetSrc and cidOf(targetSrc)
+    if not cid then return { ok = false, line = 'No such patient.' } end
+    if not within(src, targetSrc, (Config.AdministerDistance or 3.0) + 1.0) then
+        return { ok = false, line = 'Get closer to the patient.' }
+    end
+    local sid, st = stationOfPatient(cid, targetSrc)
+    if not st or st.kind ~= 'bed' then return { ok = false, line = 'The patient has to be lying on a bed first.' } end
+
+    local adm = admissions[cid]
+    local left, longest, blocked = adm and adm.left or {}, 0, 0
+    local added = 0
+    for id, row in pairs(conditions[cid] or {}) do
+        local def = Config.Conditions[row.condition_key]
+        if def and not left[id] then
+            local can, why = Rules.restTreats(def, row)
+            if can then
+                left[id] = Rules.restSeconds(row.severity, (Config.RestOrder or {}).minutesPerSeverity)
+                added = added + 1
+            elseif why == 'undiagnosed' then
+                blocked = blocked + 1
+            end
+        end
+    end
+    for _, secs in pairs(left) do if secs > longest then longest = secs end end
+    if added == 0 then
+        if blocked > 0 then
+            return { ok = false, line = 'Rest is for a diagnosed condition. Confirm it with a scan and /diagnose it first.',
+                     hint = hintFor(src, 'confirm') }
+        end
+        return { ok = false, line = 'Nothing they have is treated by rest.' }
+    end
+
+    local staffName = whoIs(src)
+    local minutes = math.ceil(longest / 60)
+    admissions[cid] = { sid = sid, left = left, lastTick = adm and adm.lastTick or os.time(),
+                        by = { cid = cidOf(src), name = staffName, job = job } }
+    recordVisit(cid, {
+        event_type = 'admission', staff_citizenid = cidOf(src), staff_name = staffName, staff_job = job,
+        notes = ('Bed rest ordered, about %d min'):format(minutes), data = { minutes = minutes },
+    })
+    TriggerClientEvent('ox_lib:notify', targetSrc, {
+        description = ('%s orders bed rest. Stay on the bed about %d minutes.'):format(staffName, minutes),
+        type = 'inform', duration = 10000,
+    })
+    return { ok = true, line = ('Bed rest ordered: about %d minutes on the bed.'):format(minutes) }
+end
+
+lib.callback.register('dps-medical:orderRest', function(src, targetSrc)
+    return orderRest(src, targetSrc)
+end)
+
+lib.addCommand('orderrest', {
+    help = 'Order bed rest for a patient lying on a bed (medical staff only)',
+    params = { { name = 'id', type = 'playerId', help = 'Patient server id' } },
+}, function(source, args)
+    local res = orderRest(source, args.id)
+    TriggerClientEvent('ox_lib:notify', source, {
+        description = res.line .. (res.hint and ('\n' .. res.hint) or ''),
+        type = res.ok and 'success' or 'error', duration = 9000,
+    })
+end)
 
 lib.callback.register('dps-medical:administer', function(src, targetSrc, itemName)
     return administer(src, targetSrc, itemName)
