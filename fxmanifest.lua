@@ -4,7 +4,7 @@ lua54 'yes'
 
 name 'dps-medical'
 author 'DelPerroSands'
-version '0.1.0'
+version '0.2.0'
 description 'Patient records and illness for DPS. Reads wasabi_ambulance; never modifies it.'
 
 -- Scope note, because it is the whole design:
@@ -19,6 +19,7 @@ shared_script '@ox_lib/init.lua'
 
 shared_scripts {
     'config.lua',
+    'shared/rules.lua', -- 0.2.0: the plain decisions, tested by tests/run.lua
 }
 
 client_scripts {

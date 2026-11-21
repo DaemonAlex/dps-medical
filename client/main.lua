@@ -464,6 +464,20 @@ local function openDiagnostics(targetServerId)
 
     table.sort(options, function(a, b) return a.title < b.title end)
 
+    -- Rest is the cure for what no medication treats. Always last in the list.
+    options[#options + 1] = {
+        title = 'Order bed rest',
+        description = 'For a diagnosed concussion, internal bleed or soft tissue injury. Patient must be on a bed.',
+        icon = 'bed',
+        onSelect = function()
+            local res = lib.callback.await('dps-medical:orderRest', false, targetServerId)
+            lib.notify({
+                description = (res and res.line or 'No.') .. ((res and res.hint) and ('\n' .. res.hint) or ''),
+                type = (res and res.ok) and 'success' or 'error', duration = 9000,
+            })
+        end,
+    }
+
     lib.registerContext({
         id = 'dps_medical_diagnostics',
         title = 'Diagnostics',
@@ -533,21 +547,51 @@ RegisterKeyMapping('diagnostics', 'Medical: diagnostics on inspected patient', '
 -- Conditions from the server
 -- ===========================================================================
 
-RegisterNetEvent('dps-medical:client:conditions', function(rows)
-    myConditions = rows or {}
-end)
-
----Tell the player when a NEW symptom appears. Never names the illness - that
----is what a doctor is for.
+---Tell the player what they feel: once when a symptom starts, and again each
+---time it gets worse. Never names the illness - that is what a doctor is for.
+---knownSymptoms holds the severity last announced; a symptom that has gone is
+---forgotten, so catching something again is announced again.
 local function announceSymptoms(symptoms)
+    local now = {}
     for i = 1, #symptoms do
         local s = symptoms[i]
-        if not knownSymptoms[s.key] then
-            knownSymptoms[s.key] = true
+        local sev = tonumber(s.severity) or 1
+        now[s.key] = true
+        local told = knownSymptoms[s.key]
+        if not told then
             lib.notify({ description = s.patient, type = 'inform', duration = 7000 })
+        elseif sev > told then
+            local word = Config.SeverityWords and Config.SeverityWords[sev]
+            lib.notify({
+                description = word and ('%s: %s.'):format(s.label, word) or s.patient,
+                type = sev >= 3 and 'warning' or 'inform', duration = 7000,
+            })
         end
+        knownSymptoms[s.key] = math.max(told or 0, sev)
+    end
+    for key in pairs(knownSymptoms) do
+        if not now[key] then knownSymptoms[key] = nil end
     end
 end
+
+-- The server pushes this every tick while the player is unwell, and after any
+-- treatment. `view` is what the patient may know (symptoms, diagnoses).
+RegisterNetEvent('dps-medical:client:conditions', function(rows, view)
+    myConditions = rows or {}
+    if view and view.symptoms then announceSymptoms(view.symptoms) end
+end)
+
+-- A medic wants to move me onto a scanner or bed: I get to say no. The server
+-- treats anything but a clear yes as a refusal.
+lib.callback.register('dps-medical:consent', function(kindLabel, staffName)
+    return lib.alertDialog({
+        header = 'Medical staff',
+        content = ('%s wants to move you onto the %s. You will have to hold still for the scan.'):format(
+            tostring(staffName or 'A medic'), tostring(kindLabel or 'station')),
+        centered = true, cancel = true,
+        labels = { confirm = 'Agree', cancel = 'Refuse' },
+    }) == 'confirm'
+end)
 
 -- ===========================================================================
 -- The patient's own view
